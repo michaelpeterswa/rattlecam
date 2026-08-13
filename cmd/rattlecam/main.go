@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -235,6 +236,39 @@ type daemon struct {
 	lastObserved time.Time // observation time of the last reading we rendered
 	lastRender   time.Time
 	lastGood     *wx.Reading // survives an Influx outage
+
+	warnedElevation bool
+}
+
+// seaLevelPlausible is the lowest station pressure a sea-level station would
+// realistically report. Below this at sea level means a major hurricane, so on
+// a station that is not in one it means the station is simply up a mountain.
+const seaLevelPlausible = 950 // mb
+
+// checkElevation warns once when the pressure implies an elevation the
+// configuration does not have.
+//
+// SITE_ELEVATION_M defaults to 0, and at 0 the reduction is a no-op, so a
+// station on a mountain publishes its raw station pressure — several inches
+// below anything a local forecast shows. Nothing else catches it: the query
+// succeeds, the field is present, the frame renders, and the number is simply
+// wrong. A reading of 899 mb at a configured elevation of zero is not a
+// plausible sea-level observation, so it is worth saying so out loud.
+func (d *daemon) checkElevation(r *wx.Reading) {
+	if d.warnedElevation || d.cfg.Elevation != 0 || r == nil {
+		return
+	}
+	p, ok := r.Raw("p")
+	if !ok || p >= seaLevelPlausible {
+		return
+	}
+	d.warnedElevation = true
+
+	unreduced, _ := r.PressureInHg(0)
+	d.log.Warn("SITE_ELEVATION_M is 0 but the station pressure implies altitude; the frame will publish the unreduced value",
+		"station_pressure_mb", p,
+		"would_publish_in", math.Round(unreduced*100)/100,
+		"hint", "set SITE_ELEVATION_M to the station's elevation in metres")
 }
 
 // loop polls Influx and renders when a genuinely new observation lands, with a
@@ -264,6 +298,7 @@ func (d *daemon) tick(ctx context.Context) {
 	switch {
 	case err == nil:
 		d.lastGood = reading
+		d.checkElevation(reading)
 		d.metrics.InfluxQuery(ctx, time.Since(started), "")
 		// The packet's own timestamp, so observation age reflects a frozen
 		// station just as surely as a broken query.

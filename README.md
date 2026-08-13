@@ -182,7 +182,7 @@ advancing.
 | `SITE_NAME` | *(unset)* | Rendered at the left of the bar |
 | `ANNOTATION_PATH` | `assets/annotation.png` | Registered overlay, e.g. peak outlines; absent at the default path is fine |
 | `CREDIT` | *(unset)* | Standing attribution, e.g. `This view is provided by RSVU`; placed by `credit_placement` |
-| `SITE_ELEVATION_M` | `0` | Required for correct pressure — see below |
+| `SITE_ELEVATION_M` | `0` | Required for correct pressure — see below. The daemon warns once if the pressure implies altitude and this is still `0` |
 | `THEME_PATH` | *(unset)* | Layout JSON produced by the preview harness |
 | `TZ` | `America/Los_Angeles` | Timestamp display |
 | `METRICS_ENABLED` | `true` | |
@@ -218,7 +218,12 @@ Three things that matter here:
   suffix, so even `precipitation_type` and `strike_count` are floats.
 - **`p` is station pressure, not sea level.** Publishing it raw would show a
   number well below what any local forecast says. Set `SITE_ELEVATION_M` and
-  the altimeter reduction in `wx.PressureInHg` handles it.
+  the altimeter reduction in `wx.PressureInHg` handles it. At the Valley View
+  site this is the difference between publishing 29.94 in and 26.57 in, and
+  nothing else in the pipeline notices: the query succeeds, the field is
+  present, the frame renders, and the number is simply wrong. The daemon
+  therefore warns once when the pressure is too low to be a sea-level reading
+  and the elevation is still zero.
 - **`_time` is the observation time**, taken from the packet at second
   precision — not ingest time. That's what makes it trustworthy as a freshness
   signal, and why the Flux `range()` window doubles as the staleness gate: a
