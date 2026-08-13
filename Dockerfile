@@ -39,6 +39,9 @@ COPY --from=build /out/rattlecam /usr/local/bin/rattlecam
 COPY assets/ /app/assets/
 COPY theme.json /app/theme.json
 
-USER nonroot:nonroot
+# 65532 is distroless's "nonroot". Numeric rather than named so the host can
+# resolve it — a name means nothing outside the image, and an orchestrator
+# enforcing runAsNonRoot cannot verify one.
+USER 65532:65532
 
 ENTRYPOINT ["/usr/local/bin/rattlecam"]
