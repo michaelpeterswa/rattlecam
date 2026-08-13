@@ -52,10 +52,9 @@ type Config struct {
 	// NightEnter and NightExit are a hysteresis band on a 0-255 scale. Real
 	// frames from this site measure around 10 at night and above 100 in daylight,
 	// so the defaults sit in the empty middle with room on both sides.
-	NightEnter   float64
-	NightExit    float64
-	NightInvert  bool // draw the annotation in white after dark
-	NightArchive bool // keep archiving through the night
+	NightEnter  float64
+	NightExit   float64
+	NightInvert bool // draw the annotation in white after dark
 
 	// WebWidth publishes an extra, narrower copy of the branded frame for
 	// websites. Zero disables it.
@@ -124,10 +123,9 @@ func Load() (*Config, error) {
 		ThemePath:      l.str("THEME_PATH", ""),
 		JPEGQuality:    l.int("JPEG_QUALITY", 92),
 
-		NightEnter:   l.float("NIGHT_ENTER_LUMA", light.DefaultEnter),
-		NightExit:    l.float("NIGHT_EXIT_LUMA", light.DefaultExit),
-		NightInvert:  l.bool("NIGHT_INVERT_ANNOTATION", true),
-		NightArchive: l.bool("NIGHT_ARCHIVE", false),
+		NightEnter:  l.float("NIGHT_ENTER_LUMA", light.DefaultEnter),
+		NightExit:   l.float("NIGHT_EXIT_LUMA", light.DefaultExit),
+		NightInvert: l.bool("NIGHT_INVERT_ANNOTATION", true),
 
 		WebWidth:      l.int("WEB_WIDTH", 1280),
 		OutputDir:     l.str("OUTPUT_DIR", "/var/www/rattlecam"),

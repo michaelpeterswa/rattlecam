@@ -432,20 +432,18 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 		}
 	}
 
-	// The archive exists to make timelapses. A night's worth of near-black
-	// masters contributes nothing to one and is the bulk of what the tower
-	// uploads and the bucket stores, so it is skipped unless NIGHT_ARCHIVE asks
-	// for it. The live frame keeps publishing either way — only the archive
-	// pauses, and everything below still runs.
-	if !night || d.cfg.NightArchive {
-		if err := d.pub.Archive(ctx, now, clean); err != nil {
-			// Archiving is for timelapses later; failing it must not stop the feed.
-			d.log.Warn("archive failed", "error", err)
-			if errors.Is(err, publish.ErrStore) {
-				d.metrics.StoreError(ctx)
-			} else {
-				d.metrics.FrameError(ctx, metrics.StageArchive)
-			}
+	// Archived on the same cadence around the clock. Night frames are near-black
+	// and make a poor timelapse, but a frame not archived tonight cannot be
+	// recovered tomorrow, and the bucket's lifecycle rules already tier old
+	// masters down to nearline and colder — which is the cheaper place to solve
+	// storage cost than by never writing them.
+	if err := d.pub.Archive(ctx, now, clean); err != nil {
+		// Archiving is for timelapses later; failing it must not stop the feed.
+		d.log.Warn("archive failed", "error", err)
+		if errors.Is(err, publish.ErrStore) {
+			d.metrics.StoreError(ctx)
+		} else {
+			d.metrics.FrameError(ctx, metrics.StageArchive)
 		}
 	}
 

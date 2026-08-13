@@ -121,9 +121,6 @@ func TestNightDefaults(t *testing.T) {
 	if !c.NightInvert {
 		t.Error("NIGHT_INVERT_ANNOTATION defaulted off; inverting after dark is the point of the feature")
 	}
-	if c.NightArchive {
-		t.Error("NIGHT_ARCHIVE defaulted on; night masters are the bulk of the archive and make no timelapse")
-	}
 }
 
 // The band has to be a band. Equal thresholds are a single threshold, which

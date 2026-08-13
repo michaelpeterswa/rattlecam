@@ -445,19 +445,20 @@ so the thresholds sit in the empty middle:
 | `NIGHT_ENTER_LUMA` | `35` | at or below this, night begins |
 | `NIGHT_EXIT_LUMA` | `55` | at or above this, day resumes |
 | `NIGHT_INVERT_ANNOTATION` | `true` | set false to keep black ink around the clock |
-| `NIGHT_ARCHIVE` | `false` | set true to keep archiving after dark |
 
 The two thresholds are a hysteresis band, and the gap between them is the point:
 with a single threshold, dusk sits on the boundary and the annotation's colour
 flips back and forth on every poll. Startup fails if they are not ordered.
 
 Nothing else about the frame changes at night. The same live picture publishes on
-the same cadence, and the data bar already carries its own backing so it survives
-a black background unaided. Archiving pauses, though — a night of near-black
-masters is the bulk of what the tower uploads and contributes nothing to a
-timelapse. `rattlecam_night` and `rattlecam_frame_luma` expose the state and the
-measurement behind it; graphing the latter over a day makes a wrong threshold
-obvious.
+the same cadence, the data bar already carries its own backing so it survives a
+black background unaided, and masters are archived at the same interval around
+the clock — a frame not archived tonight cannot be recovered tomorrow, and the
+bucket's lifecycle rules already tier old masters down to nearline and colder,
+which is the cheaper place to solve storage cost than by never writing them.
+
+`rattlecam_night` and `rattlecam_frame_luma` expose the state and the measurement
+behind it; graphing the latter over a day makes a wrong threshold obvious.
 
 To see the treatment without waiting for dark, point the preview harness at a
 night capture — `-night` defaults to `auto` and measures the still exactly as the
