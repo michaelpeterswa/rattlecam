@@ -62,11 +62,15 @@ jobs:
             -o rattlecam-gateway-linux-amd64 ./cmd/gateway
           sha256sum rattlecam-gateway-linux-amd64 > rattlecam-gateway-linux-amd64.sha256
 
+      # The tag goes through the environment rather than being interpolated into
+      # the script: a ${{ }} expansion is substituted before the shell ever runs,
+      # so anything quote-like in a tag name would execute rather than be read.
       - name: Attach to the release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release upload "$RELEASE_TAG" \
             rattlecam-gateway-linux-amd64 \
             rattlecam-gateway-linux-amd64.sha256 \
             --clobber

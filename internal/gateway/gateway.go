@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -55,6 +56,11 @@ type Config struct {
 	RatePerMinute int
 	Burst         int
 
+	// TrustForwardedFrom reports whether a peer address is a proxy whose
+	// X-Forwarded-For can be believed. Nil trusts loopback only, which is where
+	// the reverse proxy runs.
+	TrustForwardedFrom func(peer string) bool
+
 	Log *slog.Logger
 }
 
@@ -67,6 +73,9 @@ type Gateway struct {
 	mu      sync.RWMutex
 	cached  map[string]Object
 	limiter *limiter
+
+	// trusted reports whether a peer's X-Forwarded-For may be believed.
+	trusted func(string) bool
 }
 
 func New(src Source, cfg Config) (*Gateway, error) {
@@ -82,12 +91,16 @@ func New(src Source, cfg Config) (*Gateway, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	if cfg.TrustForwardedFrom == nil {
+		cfg.TrustForwardedFrom = isLoopback
+	}
 
 	g := &Gateway{
-		src:    src,
-		cfg:    cfg,
-		log:    cfg.Log,
-		cached: make(map[string]Object, len(cfg.Objects)),
+		src:     src,
+		cfg:     cfg,
+		log:     cfg.Log,
+		cached:  make(map[string]Object, len(cfg.Objects)),
+		trusted: cfg.TrustForwardedFrom,
 	}
 	if cfg.RatePerMinute > 0 {
 		g.limiter = newLimiter(cfg.RatePerMinute, cfg.Burst)
@@ -174,7 +187,7 @@ func (g *Gateway) Handler() http.Handler {
 
 func (g *Gateway) serve(object string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if g.limiter != nil && !g.limiter.allow(clientIP(r)) {
+		if g.limiter != nil && !g.limiter.allow(clientIP(r, g.trusted)) {
 			w.Header().Set("Retry-After", "60")
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
@@ -214,33 +227,42 @@ func (g *Gateway) serve(object string) http.Handler {
 	})
 }
 
-// clientIP prefers the address Caddy forwarded, since the gateway only ever
-// sees the proxy otherwise and every client would share one bucket.
-func clientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		// Left-most entry is the original client.
-		if i := len(fwd); i > 0 {
-			for j, c := range fwd {
-				if c == ',' {
-					return trimSpace(fwd[:j])
-				}
-			}
-			return trimSpace(fwd)
-		}
-	}
+// clientIP decides who to rate limit.
+//
+// X-Forwarded-For cannot be taken at face value. A proxy appends to it rather
+// than replacing it, so a client that sends its own header ends up as the
+// left-most entry — and trusting that entry hands every caller an unlimited
+// supply of rate-limit identities, which defeats the limiter and grows its map
+// without bound at the same time.
+//
+// Only the entry the immediately-upstream proxy appended can be believed, and
+// only when the request genuinely arrived from that proxy. Anything else falls
+// back to the peer address, which cannot be forged over TCP.
+func clientIP(r *http.Request, trusted func(string) bool) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		host = r.RemoteAddr
+	}
+	if !trusted(host) {
+		return host
+	}
+
+	fwd := r.Header.Get("X-Forwarded-For")
+	if fwd == "" {
+		return host
+	}
+	// Right-most is the address our own proxy added; everything left of it came
+	// from further out and may be invented.
+	parts := strings.Split(fwd, ",")
+	if peer := strings.TrimSpace(parts[len(parts)-1]); peer != "" {
+		return peer
 	}
 	return host
 }
 
-func trimSpace(s string) string {
-	for len(s) > 0 && (s[0] == ' ' || s[0] == '\t') {
-		s = s[1:]
-	}
-	for len(s) > 0 && (s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
-		s = s[:len(s)-1]
-	}
-	return s
+// isLoopback reports whether an address belongs to this host, which is where
+// the reverse proxy in front of the gateway runs.
+func isLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

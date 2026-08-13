@@ -14,6 +14,12 @@ type limiter struct {
 	perMinute float64
 	burst     float64
 
+	// maxKeys bounds the map. Sweeping alone is not enough: it runs on the
+	// refresh interval, and a flood of distinct addresses between two sweeps
+	// would grow this without limit. On a 1 GB machine that is a way to take
+	// the gateway down rather than merely abuse it.
+	maxKeys int
+
 	mu      sync.Mutex
 	buckets map[string]*bucket
 }
@@ -32,6 +38,7 @@ func newLimiter(perMinute, burst int) *limiter {
 	return &limiter{
 		perMinute: float64(perMinute),
 		burst:     float64(burst),
+		maxKeys:   50_000,
 		buckets:   make(map[string]*bucket),
 	}
 }
@@ -44,6 +51,9 @@ func (l *limiter) allow(key string) bool {
 
 	b, ok := l.buckets[key]
 	if !ok {
+		if len(l.buckets) >= l.maxKeys {
+			l.evictOldestLocked(now)
+		}
 		l.buckets[key] = &bucket{tokens: l.burst - 1, last: now}
 		return true
 	}
@@ -61,6 +71,25 @@ func (l *limiter) allow(key string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// evictOldestLocked makes room by discarding the least recently seen entry.
+//
+// Dropping a bucket only ever forgives a client, never punishes one, so this is
+// safe to do under pressure: the worst case is that an attacker flooding unique
+// addresses resets their own limits, which is exactly the position they were in
+// before the limiter existed.
+func (l *limiter) evictOldestLocked(now time.Time) {
+	var oldestKey string
+	oldest := now
+	for k, b := range l.buckets {
+		if b.last.Before(oldest) {
+			oldest, oldestKey = b.last, k
+		}
+	}
+	if oldestKey != "" {
+		delete(l.buckets, oldestKey)
+	}
 }
 
 // sweep drops buckets that have been idle long enough to have refilled anyway.

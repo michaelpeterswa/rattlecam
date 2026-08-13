@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -275,8 +276,76 @@ func TestRateLimitUsesForwardedAddress(t *testing.T) {
 	if code := send("203.0.113.5"); code != http.StatusTooManyRequests {
 		t.Errorf("same client got %d, want 429", code)
 	}
-	if code := send("198.51.100.9, 203.0.113.5"); code != http.StatusOK {
+	if code := send("198.51.100.9"); code != http.StatusOK {
 		t.Errorf("different client got %d, want 200", code)
+	}
+}
+
+// A proxy appends to X-Forwarded-For rather than replacing it, so a client that
+// sends its own header lands left-most. Trusting that entry would hand every
+// caller an unlimited supply of rate-limit identities.
+func TestForgedForwardedForCannotBypassTheLimit(t *testing.T) {
+	src := newSource("frame")
+	g := newGateway(t, src, Config{RatePerMinute: 60, Burst: 2})
+	g.refreshAll(context.Background())
+
+	// One real client, inventing a different left-most entry every time. The
+	// right-most value is what the proxy actually observed.
+	var allowed int
+	for i := range 20 {
+		req := httptest.NewRequest("GET", "/latest.jpg", nil)
+		req.RemoteAddr = "127.0.0.1:5000"
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d, 203.0.113.5", i))
+		rec := httptest.NewRecorder()
+		g.Handler().ServeHTTP(rec, req)
+		if rec.Code == http.StatusOK {
+			allowed++
+		}
+	}
+	if allowed > 2 {
+		t.Errorf("forged headers got %d requests through a burst of 2", allowed)
+	}
+}
+
+// An untrusted peer's X-Forwarded-For must be ignored entirely, or reaching the
+// gateway directly would sidestep the limiter the same way.
+func TestForwardedForIsIgnoredFromAnUntrustedPeer(t *testing.T) {
+	src := newSource("frame")
+	g := newGateway(t, src, Config{RatePerMinute: 60, Burst: 2})
+	g.refreshAll(context.Background())
+
+	var allowed int
+	for i := range 20 {
+		req := httptest.NewRequest("GET", "/latest.jpg", nil)
+		req.RemoteAddr = "203.0.113.5:4000" // not the proxy
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d", i))
+		rec := httptest.NewRecorder()
+		g.Handler().ServeHTTP(rec, req)
+		if rec.Code == http.StatusOK {
+			allowed++
+		}
+	}
+	if allowed > 2 {
+		t.Errorf("a direct caller got %d requests through a burst of 2", allowed)
+	}
+}
+
+// Sweeping alone runs only on the refresh interval, so a flood between sweeps
+// would grow the map without limit. On a 1 GB host that is a way to take the
+// gateway down rather than merely abuse it.
+func TestLimiterMapIsBounded(t *testing.T) {
+	l := newLimiter(60, 5)
+	l.maxKeys = 100
+
+	for i := range 5000 {
+		l.allow(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+	}
+
+	l.mu.Lock()
+	n := len(l.buckets)
+	l.mu.Unlock()
+	if n > 100 {
+		t.Errorf("limiter holds %d buckets, over its %d cap", n, 100)
 	}
 }
 
