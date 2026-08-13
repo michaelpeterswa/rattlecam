@@ -188,6 +188,8 @@ advancing.
 | `GCS_PREFIX` | *(unset)* | Optional key prefix inside the bucket |
 | `GCS_ARCHIVE` | `true` | Upload dated masters under `archive/` |
 | `GCS_CACHE_CONTROL` | `no-cache, max-age=0, must-revalidate` | Applied to the `latest-*` objects |
+| `SPOOL_DIR` | `/var/spool/rattlecam` | Queue for frames the link could not carry yet |
+| `SPOOL_MAX_BYTES` | `2147483648` | Backlog cap; oldest archive frames are dropped past it |
 | `ARCHIVE_DIR` | *(unset)* | Unset disables archiving |
 | `RETENTION_DAYS` | `0` | `0` keeps archives forever |
 | `JPEG_QUALITY` | `92` | |
@@ -305,6 +307,30 @@ Local writes continue either way. A failed upload is reported as an error
 wrapping `publish.ErrStore`, which the daemon logs and counts on
 `rattlecam_store_errors_total` before carrying on — the frame is on disk, and a
 stale feed beats treating the whole cycle as lost.
+
+### Surviving an outage
+
+The link to a mountain-top camera is not reliable, and an outage without a queue
+is simply lost footage: the frame renders, the upload fails, and that moment
+never reaches the bucket. So uploads do not happen on the render path at all. A
+frame is finished once it reaches local disk; a separate drainer moves it to the
+bucket when the network allows, retrying and catching up on its own.
+
+The two object families need opposite queue semantics, which is the part worth
+knowing:
+
+- **`latest.jpg` supersedes.** Only the newest pending frame is kept. Draining an
+  hour of superseded frames in order would march the public image backwards
+  through the outage before arriving at the present.
+- **`archive/…` accumulates.** Every entry is a distinct moment under an
+  immutable name, and a timelapse with holes is what the queue exists to prevent.
+
+Recovery restores the live frame first, then backfills history in chronological
+order. The queue is bounded by `SPOOL_MAX_BYTES`, because a tower disk fills in
+well under a day at a frame a minute — past the cap the oldest archive frames are
+dropped, and `latest.jpg` is never evicted. Watch `rattlecam_spool_entries`: a
+backlog that climbs and never falls is a dead link, and one that never empties is
+a link too slow to keep up.
 
 Two details that are easy to get wrong:
 

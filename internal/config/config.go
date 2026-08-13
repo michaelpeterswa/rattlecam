@@ -52,6 +52,11 @@ type Config struct {
 	GCSArchive      bool
 	GCSCacheControl string
 
+	// Frames are queued here when the link to the bucket is down, and drained
+	// when it returns. Empty disables queueing and uploads become inline.
+	SpoolDir      string
+	SpoolMaxBytes int
+
 	// Observability
 	MetricsEnabled  bool
 	MetricsExporter string // prometheus, otlpgrpc or otlphttp
@@ -107,6 +112,8 @@ func Load() (*Config, error) {
 		GCSPrefix:       l.str("GCS_PREFIX", ""),
 		GCSArchive:      l.bool("GCS_ARCHIVE", true),
 		GCSCacheControl: l.str("GCS_CACHE_CONTROL", "no-cache, max-age=0, must-revalidate"),
+		SpoolDir:        l.str("SPOOL_DIR", "/var/spool/rattlecam"),
+		SpoolMaxBytes:   l.int("SPOOL_MAX_BYTES", 2<<30),
 
 		MetricsEnabled:  l.bool("METRICS_ENABLED", true),
 		MetricsExporter: l.str("METRICS_EXPORTER", "prometheus"),
@@ -145,6 +152,9 @@ func Load() (*Config, error) {
 
 	if c.JPEGQuality < 1 || c.JPEGQuality > 100 {
 		l.fail("JPEG_QUALITY: %d is outside 1..100", c.JPEGQuality)
+	}
+	if c.SpoolMaxBytes < 0 {
+		l.fail("SPOOL_MAX_BYTES: %d is negative", c.SpoolMaxBytes)
 	}
 	if c.RetentionDays < 0 {
 		l.fail("RETENTION_DAYS: %d is negative (0 keeps archives forever)", c.RetentionDays)
