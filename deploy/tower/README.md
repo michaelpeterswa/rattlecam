@@ -13,8 +13,8 @@ deploy/tower/
 ├── .env                        from .env.example
 ├── theme.json                  copied from the repository root
 ├── assets/
-│   ├── font.ttf                a licence you may redistribute — Inter, Barlow
-│   ├── font-bold.ttf           Condensed and Roboto Condensed are all OFL
+│   ├── font.ttf                comes with the repository (OFL)
+│   ├── font-bold.ttf           comes with the repository (OFL)
 
 │   ├── logo.png
 │   └── annotation.png          optional, must match the camera's aspect ratio
@@ -22,7 +22,8 @@ deploy/tower/
     └── gcp-credentials.json    tofu output -raw rattlecam_service_account_key | base64 -d
 ```
 
-Assets are gitignored, so they are copied to the host rather than pulled. The
+The fonts come with the repository. Only the artwork is copied by hand — the
+logo and the peak annotation are the agency's own and are not committed. The
 daemon refuses to start without the fonts, which is deliberate: a missing font is
 a startup failure, not a degraded frame.
 

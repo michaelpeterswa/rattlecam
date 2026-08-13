@@ -33,15 +33,10 @@ jobs:
           cache: true
 
       # internal/overlay renders through real font files and skips itself when
-      # none is available. Fonts are gitignored, so without this the whole suite
-      # would pass by not running.
-      - name: Install a TrueType font
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
-
+      # none is available. The fonts are committed, so the suite runs against
+      # the same face that ships rather than whatever the runner happens to have.
       - name: Fail if the font is missing
-        run: test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+        run: test -f assets/font.ttf && test -f assets/font-bold.ttf
 
       - name: Build
         run: go build ./...
@@ -50,15 +45,11 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        env:
-          RATTLECAM_TEST_FONT: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
         run: go test -race -shuffle=on ./...
 
       # A skipped test is not a passing test. The overlay suite is the only one
       # that can skip, and it must not in CI.
       - name: Fail if any test skipped
-        env:
-          RATTLECAM_TEST_FONT: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
         run: |
           go test ./... -v 2>&1 | tee /tmp/test.log
           if grep -q -- "--- SKIP" /tmp/test.log; then
