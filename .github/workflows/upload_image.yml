@@ -6,7 +6,7 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write # attaching release assets
   packages: write
 
 jobs:
@@ -43,3 +43,34 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The gateway runs on a host with no container runtime, installed from a
+  # release asset the way the other services on that box are.
+  gateway-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the gateway
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath -ldflags="-s -w" \
+            -o rattlecam-gateway-linux-amd64 ./cmd/gateway
+          sha256sum rattlecam-gateway-linux-amd64 > rattlecam-gateway-linux-amd64.sha256
+
+      # The tag goes through the environment rather than being interpolated into
+      # the script: a ${{ }} expansion is substituted before the shell ever runs,
+      # so anything quote-like in a tag name would execute rather than be read.
+      - name: Attach to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            rattlecam-gateway-linux-amd64 \
+            rattlecam-gateway-linux-amd64.sha256 \
+            --clobber

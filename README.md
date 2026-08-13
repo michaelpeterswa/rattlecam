@@ -320,6 +320,40 @@ Two details that are easy to get wrong:
 Authentication is Application Default Credentials: the metadata server on GCP,
 or `GOOGLE_APPLICATION_CREDENTIALS` pointing at a key file on an on-premise host.
 
+## The gateway
+
+`cmd/gateway` serves the published frames from a **private** bucket, so the
+bucket is never exposed and every request passes through one place that can rate
+limit and log. It runs next to the reverse proxy rather than on the tower, and
+reads the bucket with that host's own credentials — no key file, just the
+instance identity.
+
+The other half of its job is arithmetic. A frame is a couple of megabytes and
+changes once a minute; fetching it per request would mean a bucket read and a
+full transfer per viewer. It holds the frame in memory and re-reads only when the
+generation changes, so bucket cost is a function of time rather than of audience.
+Frames are served with an `ETag` taken from the generation, so a poller checking
+every ten seconds costs a few hundred bytes rather than two megabytes.
+
+Only `/latest.jpg` and `/latest-clean.jpg` are reachable. The archive is
+deliberately absent: it is a bulk-download surface and nothing about the public
+feed needs it.
+
+```
+GATEWAY_ADDR     listen address                     (default :8080)
+GCS_BUCKET       bucket to read                     (required)
+GCS_PREFIX       key prefix inside the bucket
+GATEWAY_REFRESH  how often to check for a new frame (default 10s)
+GATEWAY_RATE     requests per minute per client     (default 120, 0 disables)
+GATEWAY_BURST    burst allowance per client         (default 20)
+CACHE_CONTROL    header sent with every frame
+```
+
+A failure reaching the bucket leaves the cached frame in place; a hiccup should
+not take the feed down. Rate limiting keys on `X-Forwarded-For` when present,
+because behind a proxy every request otherwise appears to come from one address
+and all clients would share a single bucket.
+
 ## Serving
 
 Point nginx or Caddy at `OUTPUT_DIR` with a short `max-age` and correct
