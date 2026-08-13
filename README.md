@@ -424,10 +424,54 @@ and all clients would share a single bucket.
 Point nginx or Caddy at `OUTPUT_DIR` with a short `max-age` and correct
 `Last-Modified`, and give the newsroom one stable URL to poll.
 
+## Night
+
+The annotation is black ink. Over a daylit ridge that reads cleanly; against a
+night sky it disappears, taking with it the one element that could still tell a
+viewer what they are looking at. So after dark it is drawn inverted, in white.
+
+Night is measured from the frame itself — the mean luma of the still that is
+about to be published — rather than from a clock or a sun-position calculation.
+The question being asked is not "has the sun set" but "can black ink still be
+seen", and overcast, smoke, terrain shadow and the camera's own exposure move
+that answer hours either side of sunset. Measuring the picture answers it
+directly, and keeps working when Influx does not.
+
+Real frames from this site measure around 10 at night and above 100 in daylight,
+so the thresholds sit in the empty middle. Night clears the lower threshold by
+3.3x; the dimmest daylight frame on hand clears the upper one by 1.9x, which is
+the tighter of the two and the one that governs getting back out of night:
+
+| var | default | |
+|---|---|---|
+| `NIGHT_ENTER_LUMA` | `35` | at or below this, night begins |
+| `NIGHT_EXIT_LUMA` | `55` | at or above this, day resumes |
+| `NIGHT_INVERT_ANNOTATION` | `true` | set false to keep black ink around the clock |
+
+The two thresholds are a hysteresis band, and the gap between them is the point:
+with a single threshold, dusk sits on the boundary and the annotation's colour
+flips back and forth on every poll. Startup fails if they are not ordered.
+
+Nothing else about the frame changes at night. The same live picture publishes on
+the same cadence, the data bar already carries its own backing so it survives a
+black background unaided, and masters are archived at the same interval around
+the clock — a frame not archived tonight cannot be recovered tomorrow, and the
+bucket's lifecycle rules already tier old masters down to nearline and colder,
+which is the cheaper place to solve storage cost than by never writing them.
+
+`rattlecam_night` and `rattlecam_frame_luma` expose the state and the measurement
+behind it; graphing the latter over a day makes a wrong threshold obvious.
+
+To see the treatment without waiting for dark, point the preview harness at a
+night capture — `-night` defaults to `auto` and measures the still exactly as the
+daemon does:
+
+```sh
+go run ./cmd/preview -image testdata/still-night.jpg -scenario night -theme theme.json
+go run ./cmd/preview -image testdata/still-night.jpg -scenario night -night off  # for comparison
+```
+
 ## Not yet wired up
 
 - Embedding assets with `go:embed` — currently loaded from disk, which is
   easier while you're iterating on the layout.
-- Night handling. A tower cam at 3am is mostly noise; you may want to skip
-  publishing, or swap in a darker overlay treatment, below some solar/lux
-  threshold. `solar_radiation` and `illuminance` are already in Influx.

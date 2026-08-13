@@ -31,6 +31,16 @@ type Frame struct {
 	// changes, and anything that never changes should not compete for the space
 	// the weather needs.
 	Credit string
+
+	// Night inverts the annotation, so the peak outline and its labels are drawn
+	// in white rather than black.
+	//
+	// The artwork is black ink, which reads cleanly over a daylit ridge and
+	// disappears completely against a night sky — taking with it the one element
+	// that could still tell a viewer what they are looking at in a dark frame.
+	// Nothing else about the frame changes: the bar already carries its own
+	// backing and survives a black background unaided.
+	Night bool
 }
 
 type Renderer struct {
@@ -46,6 +56,7 @@ type Renderer struct {
 	annotationCache  *image.RGBA
 	annotationBounds image.Rectangle
 	annotationAlpha  float64
+	annotationNight  bool
 }
 
 func NewRenderer(fontPath, boldFontPath, logoPath string, theme Theme) (*Renderer, error) {
@@ -131,7 +142,7 @@ func (r *Renderer) Render(src image.Image, f Frame) (image.Image, error) {
 	// Annotation first: it belongs to the scene, so the bar, the badge and the
 	// credit all sit on top of it rather than the other way round.
 	if r.annotation != nil && t.AnnotationOpacity > 0 {
-		layer, err := r.scaledAnnotation(b, t.AnnotationOpacity)
+		layer, err := r.scaledAnnotation(b, t.AnnotationOpacity, f.Night)
 		if err != nil {
 			return nil, err
 		}
@@ -334,9 +345,15 @@ func (r *Renderer) drawCreditBox(dc *gg.Context, b image.Rectangle, t Theme, cre
 const aspectTolerance = 0.01
 
 // scaledAnnotation returns the annotation resampled to the frame and faded to
-// the requested strength, reusing the last result when nothing has changed.
-func (r *Renderer) scaledAnnotation(b image.Rectangle, opacity float64) (*image.RGBA, error) {
-	if r.annotationCache != nil && r.annotationBounds == b && r.annotationAlpha == opacity {
+// the requested strength, inverted for night, reusing the last result when
+// nothing has changed.
+//
+// Only one variant is cached, so the twice-daily transition pays for a resample.
+// Keeping both would be faster and cost another 33 MB resident at 4K, which is
+// the wrong trade on the tower host for something that happens at dawn and dusk.
+func (r *Renderer) scaledAnnotation(b image.Rectangle, opacity float64, night bool) (*image.RGBA, error) {
+	if r.annotationCache != nil && r.annotationBounds == b &&
+		r.annotationAlpha == opacity && r.annotationNight == night {
 		return r.annotationCache, nil
 	}
 
@@ -360,11 +377,16 @@ func (r *Renderer) scaledAnnotation(b image.Rectangle, opacity float64) (*image.
 	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
 	xdraw.CatmullRom.Scale(dst, dst.Bounds(), r.annotation, ab, xdraw.Over, nil)
 
+	if night {
+		invertRGB(dst)
+	}
+
 	if opacity != 1 {
 		scaleAlpha(dst, opacity)
 	}
 
-	r.annotationCache, r.annotationBounds, r.annotationAlpha = dst, b, opacity
+	r.annotationCache, r.annotationBounds = dst, b
+	r.annotationAlpha, r.annotationNight = opacity, night
 	return dst, nil
 }
 
@@ -418,6 +440,34 @@ func (r *Renderer) drawBadge(dc *gg.Context, b image.Rectangle, t Theme) error {
 // authored faint: this one peaks at 35% alpha, so the only way to make it read
 // against a bright sky is to push past its own ceiling. Channels are clamped,
 // since premultiplied colour must never exceed alpha.
+// invertRGB inverts a layer's colour while leaving its shape alone: alpha, and
+// therefore the geometry of every line and label, is untouched.
+//
+// image.RGBA is alpha-premultiplied, so the obvious 255-v is wrong — it would
+// brighten transparent pixels into a grey haze across the whole frame. In
+// premultiplied space the exact inversion is a-v: for a straight colour c stored
+// as v = c*a, the inverted straight colour (1-c) is stored as (1-c)*a = a-v. No
+// division, so no precision lost on the faint antialiased edges either.
+//
+// It commutes with scaleAlpha, since scaling both a and v by the same factor
+// scales a-v by that factor too. Running it first only means the clamp below
+// deals with resampling artefacts before anything else sees them.
+func invertRGB(img *image.RGBA) {
+	for i := 0; i < len(img.Pix); i += 4 {
+		a := img.Pix[i+3]
+		for c := range 3 {
+			v := img.Pix[i+c]
+			// CatmullRom rings, and can overshoot v past a — which is not a
+			// valid premultiplied pixel and would wrap to near-255 on the
+			// subtraction, freckling the outline with bright dots.
+			if v > a {
+				v = a
+			}
+			img.Pix[i+c] = a - v
+		}
+	}
+}
+
 func scaleAlpha(img *image.RGBA, factor float64) {
 	if factor < 0 {
 		factor = 0
