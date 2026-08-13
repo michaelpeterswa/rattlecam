@@ -82,6 +82,10 @@ climbs, because the camera keeps returning stills and the frames keep publishing
 with hours-old weather burned into them. Pair it with `rattlecam_frame_fields`:
 age climbing with fields at zero is the staleness gate working correctly.
 
+At roughly 1.1 MB a frame — the camera's own bytes, passed through rather than
+re-encoded — the archive grows about 1.6 GB a day, and the default 2 GiB spool
+holds around 33 hours of backlog before the oldest archive frames are dropped.
+
 `rattlecam_spool_entries` says whether the link is keeping up. A backlog that
 climbs and never falls is a dead link; one that never empties is a link too slow
 to carry a frame a minute.

@@ -49,24 +49,23 @@ WINDOW="$(window_seconds "$STALE_AFTER")s"
 echo "InfluxDB ${INFLUX_URL}, org ${INFLUX_ORG}, bucket ${INFLUX_BUCKET}, window ${WINDOW}"
 echo
 
-echo "1. Reachable and authenticated"
-code="$(curl -s -o "$tmp/health" -w '%{http_code}' --max-time 10 "${INFLUX_URL}/health" || echo 000)"
+echo "1. Reachable"
+code="$(curl -s -o "$tmp/health" -w '%{http_code}' --max-time 10 "${INFLUX_URL}/health" || true)"
 [ "$code" = "200" ] || fail "GET /health returned ${code} — wrong address, or no route from this host"
 ok "service healthy"
 
-code="$(curl -s -o "$tmp/buckets" -w '%{http_code}' --max-time 10 \
-  -H "Authorization: Token ${INFLUX_TOKEN}" \
-  "${INFLUX_URL}/api/v2/buckets?name=${INFLUX_BUCKET}")"
-case "$code" in
-  200) ok "token accepted" ;;
-  401) fail "401 — the token was rejected" ;;
-  403) fail "403 — the token cannot read buckets in org ${INFLUX_ORG}" ;;
-  *) fail "${code} from the buckets endpoint" ;;
-esac
-
-grep -q "\"name\":\"${INFLUX_BUCKET}\"" "$tmp/buckets" ||
-  fail "no bucket named ${INFLUX_BUCKET} is visible to this token"
-ok "bucket ${INFLUX_BUCKET} exists"
+# The version decides whether any of this can work at all: Flux was removed in
+# InfluxDB 3, and the daemon speaks nothing else.
+version="$(curl -s -i --max-time 10 "${INFLUX_URL}/ping" 2>/dev/null |
+  awk -F': ' '/[Xx]-[Ii]nfluxdb-[Vv]ersion/ {print $2}' | tr -d '\r')"
+if [ -n "$version" ]; then
+  ok "InfluxDB ${version}"
+  case "$version" in
+    v3* | 3.*) warn "InfluxDB 3 removed Flux; the daemon queries with Flux and will not work against it" ;;
+  esac
+else
+  warn "could not read the version from /ping"
+fi
 
 echo
 echo "2. The query the daemon actually runs"
@@ -92,14 +91,29 @@ code="$(curl -s -o "$tmp/result.csv" -w '%{http_code}' --max-time 30 \
   -H "Content-Type: application/vnd.flux" \
   -H "Accept: application/csv" \
   --data-binary @"$tmp/query.flux")"
-[ "$code" = "200" ] || fail "${code} from the query endpoint: $(head -c 300 "$tmp/result.csv")"
+case "$code" in
+  200) : ;;
+  401) fail "401 — the token was rejected" ;;
+  403) fail "403 — the token cannot read bucket ${INFLUX_BUCKET} in org ${INFLUX_ORG}" ;;
+  404) fail "404 — no such org (${INFLUX_ORG}), or this is not an InfluxDB 2 query endpoint" ;;
+  *) fail "${code} from the query endpoint: $(head -c 300 "$tmp/result.csv")" ;;
+esac
 
 # Flux reports a bad query as a 200 with an error table rather than a non-200,
 # so the status alone does not tell you it worked.
+#
+# This is also where a wrong bucket name surfaces. Listing buckets is a worse
+# check: a bucket-scoped token cannot list them at all, so a healthy setup would
+# look broken. The query is what the daemon actually does, so it is what counts.
 if head -5 "$tmp/result.csv" | grep -q '^,error,reference'; then
-  fail "query error: $(sed -n '4p' "$tmp/result.csv" | cut -d, -f2)"
+  msg="$(sed -n '4p' "$tmp/result.csv" | cut -d, -f2)"
+  case "$msg" in
+    *"could not find bucket"* | *"bucket not found"*)
+      fail "bucket ${INFLUX_BUCKET} does not exist, or this token cannot read it" ;;
+    *) fail "query error: ${msg}" ;;
+  esac
 fi
-ok "query accepted"
+ok "token accepted, bucket ${INFLUX_BUCKET} readable"
 
 echo
 echo "3. What came back"
