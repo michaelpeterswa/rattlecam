@@ -188,49 +188,96 @@ func TestNilDetector(t *testing.T) {
 }
 
 // The thresholds are only defensible if real frames actually sit either side of
-// them. The stills are gitignored, so this runs where they exist and skips in
-// CI — but where it does run, a change that collapses the separation fails here
-// rather than on the published frame.
+// them, so this measures real frames from the camera the daemon runs on.
+//
+// The fixtures are 320x180 JPEGs downscaled from the 4K originals, which the
+// repo does not carry. Mean luma survives downscaling — each fixture measures
+// within 0.9 of its original — and JPEG keeps them on the YCbCr path production
+// actually uses. See testdata/README.md.
 func TestRealStillsFallOnTheExpectedSideOfTheThresholds(t *testing.T) {
-	const (
-		enter = DefaultEnter
-		exit  = DefaultExit
-	)
 	for _, tc := range []struct {
 		file  string
+		want  float64 // measured from the 4K original
 		night bool
 	}{
-		{"still-day.jpg", false},
-		{"valley-view.jpg", false},
-		{"smoke.png", false},
-		{"still-night.jpg", true},
+		{"day.jpg", 124.9, false},
+		{"valley.jpg", 107.0, false},
+		{"smoke.jpg", 144.9, false},
+		{"night.jpg", 10.6, true},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
-			path := filepath.Join("..", "..", "testdata", tc.file)
-			f, err := os.Open(path)
+			f, err := os.Open(filepath.Join("testdata", tc.file))
 			if err != nil {
-				t.Skipf("%s is not present (stills are gitignored)", path)
+				t.Fatal(err)
 			}
 			defer f.Close() //nolint:errcheck // read-only
 
 			img, _, err := image.Decode(f)
 			if err != nil {
-				t.Fatalf("decode %s: %v", path, err)
+				t.Fatalf("decode: %v", err)
 			}
 			luma := MeanLuma(img)
 
-			d := &Detector{Enter: enter, Exit: exit}
+			// A drift here means the fixture no longer stands in for the frame it
+			// was cut from, which would quietly hollow out the checks below.
+			closeTo(t, luma, tc.want, 2, "MeanLuma")
+
+			d := &Detector{Enter: DefaultEnter, Exit: DefaultExit}
+			night, _ := d.Observe(luma)
+			if night != tc.night {
+				t.Errorf("%s measured %.1f and was classified night=%v, want night=%v (band %.0f..%.0f)",
+					tc.file, luma, night, tc.night, DefaultEnter, DefaultExit)
+			}
+			// Daylight must also clear the upper threshold, or a frame like this
+			// could enter night and never get back out of it.
+			if !tc.night && luma < DefaultExit {
+				t.Errorf("%s measured %.1f, below the exit threshold of %.0f: it would not restore day",
+					tc.file, luma, DefaultExit)
+			}
+		})
+	}
+}
+
+// The margin is the reason these thresholds are safe to leave unattended. If a
+// change ever narrows it, that should be a deliberate decision rather than
+// something noticed the first time dusk misbehaves.
+//
+// The tightest real case is the dimmest daylight frame against the exit
+// threshold, at about 1.95x — daylight clears the enter threshold by a much
+// wider 3x, but it is getting back *out* of night that the exit threshold
+// governs, so that is the one to guard.
+func TestRealStillsKeepAWideMarginFromTheBand(t *testing.T) {
+	const wantRatio = 1.75
+
+	for _, tc := range []struct {
+		file      string
+		threshold float64
+		night     bool
+	}{
+		{"day.jpg", DefaultExit, false},
+		{"valley.jpg", DefaultExit, false},
+		{"night.jpg", DefaultEnter, true},
+	} {
+		t.Run(tc.file, func(t *testing.T) {
+			f, err := os.Open(filepath.Join("testdata", tc.file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close() //nolint:errcheck // read-only
+
+			img, _, err := image.Decode(f)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			luma := MeanLuma(img)
+
+			ratio := luma / tc.threshold
 			if tc.night {
-				if night, _ := d.Observe(luma); !night {
-					t.Errorf("%s measured %.1f, which is above the enter threshold of %.0f", tc.file, luma, enter)
-				}
-				return
+				ratio = tc.threshold / luma
 			}
-			if night, _ := d.Observe(luma); night {
-				t.Errorf("%s measured %.1f, which is at or below the enter threshold of %.0f", tc.file, luma, enter)
-			}
-			if luma < exit {
-				t.Errorf("%s measured %.1f, below the exit threshold of %.0f: it would not restore day", tc.file, luma, exit)
+			if ratio < wantRatio {
+				t.Errorf("%s measures %.1f against a threshold of %.0f — only %.1fx margin, want at least %.1fx",
+					tc.file, luma, tc.threshold, ratio, wantRatio)
 			}
 		})
 	}

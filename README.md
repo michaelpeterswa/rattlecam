@@ -438,7 +438,9 @@ that answer hours either side of sunset. Measuring the picture answers it
 directly, and keeps working when Influx does not.
 
 Real frames from this site measure around 10 at night and above 100 in daylight,
-so the thresholds sit in the empty middle:
+so the thresholds sit in the empty middle. Night clears the lower threshold by
+3.3x; the dimmest daylight frame on hand clears the upper one by 1.9x, which is
+the tighter of the two and the one that governs getting back out of night:
 
 | var | default | |
 |---|---|---|
