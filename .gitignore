@@ -1,8 +1,9 @@
-# Branding, loaded from disk at runtime rather than embedded so it can change
-# without a rebuild. The directory itself is tracked — its README documents what
-# belongs here, and the Dockerfile's COPY needs it to exist in a clean checkout.
-/assets/*
-!/assets/README.md
+# Fonts are OFL and travel with the repository, so a clean checkout renders and
+# the image is self-contained. The artwork does not: the logo and the peak
+# annotation are the agency's own, and a public repository is the wrong place
+# for them. They are placed on the host by hand.
+/assets/logo.png
+/assets/annotation.png
 
 # Preview harness output and source stills.
 /out/
