@@ -45,6 +45,13 @@ type Config struct {
 	ArchiveDir     string // empty disables archiving
 	RetentionDays  int
 
+	// Object storage. GCSBucket empty disables it entirely and publishing stays
+	// local-only.
+	GCSBucket       string
+	GCSPrefix       string
+	GCSArchive      bool
+	GCSCacheControl string
+
 	// Observability
 	MetricsEnabled  bool
 	MetricsExporter string // prometheus, otlpgrpc or otlphttp
@@ -95,6 +102,11 @@ func Load() (*Config, error) {
 		OutputDir:      l.str("OUTPUT_DIR", "/var/www/rattlecam"),
 		ArchiveDir:     l.str("ARCHIVE_DIR", ""),
 		RetentionDays:  l.int("RETENTION_DAYS", 0),
+
+		GCSBucket:       l.str("GCS_BUCKET", ""),
+		GCSPrefix:       l.str("GCS_PREFIX", ""),
+		GCSArchive:      l.bool("GCS_ARCHIVE", true),
+		GCSCacheControl: l.str("GCS_CACHE_CONTROL", "no-cache, max-age=0, must-revalidate"),
 
 		MetricsEnabled:  l.bool("METRICS_ENABLED", true),
 		MetricsExporter: l.str("METRICS_EXPORTER", "prometheus"),
