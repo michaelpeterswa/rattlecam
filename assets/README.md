@@ -1,0 +1,50 @@
+# assets
+
+Branding, read from disk at runtime rather than compiled in, so the logo or a
+font can change without rebuilding and redeploying the daemon. That is also why
+this directory is gitignored: it holds licensed font files and artwork that do
+not belong in the repository.
+
+Nothing renders until these three exist.
+
+| File | What it should be |
+| --- | --- |
+| `font.ttf` | Regular weight. A condensed grotesque reads best in a lower third — Inter, Barlow Condensed and Roboto Condensed all work. |
+| `font-bold.ttf` | Bold weight of the same family. Values and the site name use it. |
+| `logo.png` | Transparent PNG. See the note on shape below. |
+| `annotation.png` | *Optional.* Full-frame registered overlay — peak outlines and names. Must match the camera's aspect ratio. |
+
+## Logo shape decides placement
+
+The bar's logo slot scales the mark to the bar height, which suits a **wide
+horizontal lockup**. A **tall portrait crest** cannot work there: at a bar height
+of 11.5% it ends up a couple of hundred pixels wide at 4K, and any text inside it
+turns to mush.
+
+Set `logo_placement` in the theme accordingly:
+
+| Value | Behaviour |
+| --- | --- |
+| `bar` | In the lower third, scaled to bar height. For horizontal lockups. |
+| `top-left`, `top-right`, `bottom-left`, `bottom-right` | Corner badge, sized by `logo_height` as a fraction of image height. For portrait crests. |
+| `none` | Omit the mark. |
+
+A mostly-dark mark on a corner badge will lose its silhouette against a night
+sky, and a mostly-light one will vanish against snow or blown-out cloud. Render
+both `night` and a bright real still through the harness before committing.
+
+Must be TrueType (`.ttf`). The renderer parses these directly and will not accept
+`.otf` or a `.ttc` collection.
+
+Override the locations with `FONT_PATH`, `BOLD_FONT_PATH` and `LOGO_PATH`, or
+with `-font`, `-bold` and `-logo` on the preview harness. Passing an empty
+`-logo` omits the mark entirely.
+
+`Dockerfile` copies this directory into the image because it is read at runtime.
+
+## Source stills for the harness
+
+`cmd/preview` composites against a still you supply with `-image`; it does not
+ship one. Pull a frame off the camera, or keep a few representative ones —
+daylight, dusk, snow, blown-out sunrise — under `testdata/` and render against
+each before settling the theme.

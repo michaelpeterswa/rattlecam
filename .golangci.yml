@@ -1,0 +1,21 @@
+---
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    # Every HTTP response body in this repo has to be closed: the daemon polls
+    # Influx, NWS and Protect on a loop, so a leak compounds rather than being a
+    # one-off.
+    - bodyclose
+
+  exclusions:
+    rules:
+      # Table-driven tests read better without error checks on setup helpers.
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

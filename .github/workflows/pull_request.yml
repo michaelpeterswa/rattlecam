@@ -1,0 +1,94 @@
+---
+name: pull_request
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install commitlint
+        run: npm install --no-save @commitlint/cli @commitlint/config-conventional
+      - name: Lint commits on this branch
+        run: npx commitlint --from "origin/${{ github.base_ref }}" --to HEAD --verbose
+
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # internal/overlay renders through real font files and skips itself when
+      # none is available. Fonts are gitignored, so without this the whole suite
+      # would pass by not running.
+      - name: Install a TrueType font
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+
+      - name: Fail if the font is missing
+        run: test -f /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        env:
+          RATTLECAM_TEST_FONT: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+        run: go test -race -shuffle=on ./...
+
+      # A skipped test is not a passing test. The overlay suite is the only one
+      # that can skip, and it must not in CI.
+      - name: Fail if any test skipped
+        env:
+          RATTLECAM_TEST_FONT: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+        run: |
+          go test ./... -v 2>&1 | tee /tmp/test.log
+          if grep -q -- "--- SKIP" /tmp/test.log; then
+            echo "::error::tests were skipped in CI"
+            grep -- "--- SKIP" /tmp/test.log
+            exit 1
+          fi
+
+  golangci-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.6
+
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: yamllint
+        run: yamllint .
+
+  hadolint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile

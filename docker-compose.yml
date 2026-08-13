@@ -1,0 +1,61 @@
+---
+services:
+  rattlecam:
+    build: .
+    image: ghcr.io/michaelpeterswa/rattlecam:latest
+    restart: unless-stopped
+    environment:
+      # Required — no defaults exist for these.
+      PROTECT_HOST: ${PROTECT_HOST:?set PROTECT_HOST}
+      PROTECT_API_KEY: ${PROTECT_API_KEY:?set PROTECT_API_KEY}
+      PROTECT_CAMERA_ID: ${PROTECT_CAMERA_ID:?set PROTECT_CAMERA_ID}
+      PROTECT_CERT_SHA256: ${PROTECT_CERT_SHA256:-}
+      INFLUX_URL: ${INFLUX_URL:-http://localhost:8086}
+      INFLUX_ORG: ${INFLUX_ORG:?set INFLUX_ORG}
+      INFLUX_TOKEN: ${INFLUX_TOKEN:?set INFLUX_TOKEN}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-weather}
+      INFLUX_STATION: ${INFLUX_STATION:-}
+
+      NWS_STATION_ID: ${NWS_STATION_ID:-}
+      NWS_USER_AGENT: ${NWS_USER_AGENT:-rattlecam}
+
+      SITE_NAME: ${SITE_NAME:-Valley View}
+      CREDIT: ${CREDIT:-}
+      SITE_ELEVATION_M: ${SITE_ELEVATION_M:-0}
+      TZ: ${TZ:-America/Los_Angeles}
+
+      THEME_PATH: /app/theme.json
+      OUTPUT_DIR: /output
+      ARCHIVE_DIR: ${ARCHIVE_DIR:-}
+      RETENTION_DAYS: ${RETENTION_DAYS:-0}
+
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # "prometheus" serves /metrics on METRICS_PORT; "otlpgrpc" pushes to the
+      # LGTM stack below instead, via the standard OTEL_EXPORTER_OTLP_* vars.
+      METRICS_EXPORTER: ${METRICS_EXPORTER:-prometheus}
+      METRICS_PORT: ${METRICS_PORT:-8081}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://lgtm:4317}
+      OTEL_SERVICE_NAME: rattlecam
+    ports:
+      # /metrics and /healthcheck
+      - "${METRICS_PORT:-8081}:${METRICS_PORT:-8081}"
+    volumes:
+      # Must be writable by uid 65532 (the distroless nonroot user).
+      - ./output:/output
+      # Branding lives outside the image so it can change without a rebuild, and
+      # so a CI-built image without fonts still works.
+      - ./assets:/app/assets:ro
+      - ./theme.json:/app/theme.json:ro
+
+  # The Grafana LGTM stack, for looking at metrics locally. Set
+  # METRICS_EXPORTER=otlpgrpc to push into it rather than serving /metrics.
+  lgtm:
+    image: grafana/otel-lgtm:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"    # Grafana
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP

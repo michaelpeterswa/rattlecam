@@ -7,14 +7,16 @@ package frame
 
 import (
 	"fmt"
+	"math"
 	"time"
 
-	"github.com/michaelpeterswa/towercam/internal/overlay"
-	"github.com/michaelpeterswa/towercam/internal/wx"
+	"github.com/michaelpeterswa/rattlecam/internal/overlay"
+	"github.com/michaelpeterswa/rattlecam/internal/wx"
 )
 
 type Params struct {
 	SiteName   string
+	Credit     string  // standing attribution, e.g. "Camera brought to you by RSVU"
 	Elevation  float64 // meters, for the pressure reduction
 	StaleAfter time.Duration
 	Location   *time.Location
@@ -32,6 +34,7 @@ func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) ove
 
 	f := overlay.Frame{
 		SiteName:   p.SiteName,
+		Credit:     p.Credit,
 		Conditions: conditions,
 		CapturedAt: capturedAt.In(loc),
 	}
@@ -41,7 +44,7 @@ func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) ove
 	}
 
 	if v, ok := r.TempF(); ok {
-		f.Fields = append(f.Fields, overlay.Field{Label: "TEMP", Value: fmt.Sprintf("%.0f°F", v)})
+		f.Fields = append(f.Fields, overlay.Field{Label: "TEMP", Value: fmt.Sprintf("%.0f°F", round0(v))})
 	}
 
 	// Wind reads as one composite value: direction, sustained, then gust —
@@ -61,7 +64,7 @@ func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) ove
 		f.Fields = append(f.Fields, overlay.Field{Label: "HUMIDITY", Value: fmt.Sprintf("%.0f%%", v)})
 	}
 	if v, ok := r.DewPointF(); ok {
-		f.Fields = append(f.Fields, overlay.Field{Label: "DEW POINT", Value: fmt.Sprintf("%.0f°F", v)})
+		f.Fields = append(f.Fields, overlay.Field{Label: "DEW POINT", Value: fmt.Sprintf("%.0f°F", round0(v))})
 	}
 	if v, ok := r.PressureInHg(p.Elevation); ok {
 		f.Fields = append(f.Fields, overlay.Field{Label: "PRESSURE", Value: fmt.Sprintf("%.2f in", v)})
@@ -71,4 +74,16 @@ func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) ove
 		f.Fields = f.Fields[:p.MaxFields]
 	}
 	return f
+}
+
+// round0 rounds to a whole number and collapses negative zero.
+//
+// A reading of -17.8°C converts to -0.04°F, which %.0f renders as "-0°F". It is
+// arithmetically defensible and looks like a defect on screen.
+func round0(v float64) float64 {
+	r := math.Round(v)
+	if r == 0 {
+		return 0
+	}
+	return r
 }

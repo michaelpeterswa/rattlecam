@@ -1,0 +1,18 @@
+# Everything the image does not need. assets/ and theme.json are deliberately
+# absent from this list — they are copied in and read at runtime.
+.git
+.github
+.githooks
+node_modules
+
+# Preview harness output and source stills.
+out/
+testdata/
+
+# Built binaries; the image builds its own.
+/preview
+/rattlecam
+
+Makefile
+*.md
+!assets/README.md

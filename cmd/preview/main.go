@@ -12,6 +12,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -27,9 +28,9 @@ import (
 
 	_ "image/gif"
 
-	"github.com/michaelpeterswa/towercam/internal/frame"
-	"github.com/michaelpeterswa/towercam/internal/overlay"
-	"github.com/michaelpeterswa/towercam/internal/wx"
+	"github.com/michaelpeterswa/rattlecam/internal/frame"
+	"github.com/michaelpeterswa/rattlecam/internal/overlay"
+	"github.com/michaelpeterswa/rattlecam/internal/wx"
 )
 
 func main() {
@@ -38,6 +39,7 @@ func main() {
 		fontPath   = flag.String("font", "assets/font.ttf", "regular TTF")
 		boldPath   = flag.String("bold", "assets/font-bold.ttf", "bold TTF")
 		logoPath   = flag.String("logo", "assets/logo.png", "logo PNG (empty to omit)")
+		annotation = flag.String("annotation", "assets/annotation.png", "registered annotation PNG, e.g. peak outlines (empty to omit)")
 		themePath  = flag.String("theme", "", "theme JSON; defaults are used for anything omitted")
 		dumpTheme  = flag.String("dump-theme", "", "write the full default theme here and exit")
 		scenarios  = flag.String("scenarios", "", "JSON file of custom scenarios")
@@ -46,6 +48,7 @@ func main() {
 		contact    = flag.String("contact", "", "write a stacked bar-strip comparison here")
 		outDir     = flag.String("out", "out", "output directory")
 		site       = flag.String("site", "Tower Cam", "site name")
+		credit     = flag.String("credit", "", "standing attribution line, e.g. \"Camera brought to you by RSVU\"")
 		elevation  = flag.Float64("elevation", 0, "site elevation in meters")
 		tz         = flag.String("tz", "America/Los_Angeles", "timezone for the timestamp")
 		staleAfter = flag.Duration("stale-after", 10*time.Minute, "observations older than this drop out")
@@ -91,6 +94,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if *annotation != "" {
+		// A missing file at the default path just means there isn't one; a path
+		// given explicitly and got wrong is a real mistake. os.IsNotExist does
+		// not unwrap, so this has to be errors.Is.
+		if err := renderer.LoadAnnotation(*annotation); err != nil {
+			if !errors.Is(err, os.ErrNotExist) || *annotation != "assets/annotation.png" {
+				log.Fatal(err)
+			}
+		}
+	}
 
 	h := &harness{
 		src:       src,
@@ -99,6 +112,7 @@ func main() {
 		list:      list,
 		params: frame.Params{
 			SiteName:   *site,
+			Credit:     *credit,
 			Elevation:  *elevation,
 			StaleAfter: *staleAfter,
 			Location:   loc,
@@ -211,11 +225,12 @@ func (h *harness) contactSheet() (image.Image, error) {
 		if err != nil {
 			return nil, err
 		}
-		sub, ok := img.(interface {
-			SubImage(image.Rectangle) image.Image
-		})
+		// The renderer composites through gg, which always hands back an
+		// *image.RGBA. Asserting the concrete type rather than a SubImage
+		// interface keeps the failure legible if that ever stops being true.
+		sub, ok := img.(*image.RGBA)
 		if !ok {
-			return nil, fmt.Errorf("contact sheet: rendered image does not support SubImage")
+			return nil, fmt.Errorf("contact sheet: want *image.RGBA from renderer, got %T", img)
 		}
 
 		y := i * rowH
@@ -270,7 +285,7 @@ func (h *harness) serve(addr string) {
 
 const previewHTML = `<!doctype html>
 <meta charset="utf-8">
-<title>towercam preview</title>
+<title>rattlecam preview</title>
 <style>
   body { margin: 0; background: #14161a; color: #d8dde4;
          font: 14px system-ui, sans-serif; }
@@ -296,7 +311,7 @@ func loadImage(path string) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck // read-only
 	img, _, err := image.Decode(f)
 	if err != nil {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
@@ -309,8 +324,13 @@ func writeJPEG(path string, img image.Image, quality int) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return jpeg.Encode(f, img, &jpeg.Options{Quality: quality})
+	if err := jpeg.Encode(f, img, &jpeg.Options{Quality: quality}); err != nil {
+		f.Close() //nolint:errcheck // the encode failure is the one worth reporting
+		return err
+	}
+	// Close is where buffered data is flushed, so on a write path its error has
+	// to be returned: ignoring it reports success for a file that never landed.
+	return f.Close()
 }
 
 func writePNG(path string, img image.Image) error {
@@ -321,6 +341,9 @@ func writePNG(path string, img image.Image) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return png.Encode(f, img)
+	if err := png.Encode(f, img); err != nil {
+		f.Close() //nolint:errcheck // the encode failure is the one worth reporting
+		return err
+	}
+	return f.Close()
 }

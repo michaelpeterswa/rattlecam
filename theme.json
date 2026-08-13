@@ -1,7 +1,22 @@
 {
   "anchor": "bottom",
   "bar_height": 0.115,
-  "bar_opacity": 0.62,
-  "value_size": 0.32,
-  "max_fields": 6
+  "bar_opacity": 0.8,
+  "hairline_opacity": 0.4,
+  "cond_opacity": 0.92,
+  "label_opacity": 0.88,
+  "stamp_opacity": 0.9,
+  "credit_opacity": 0.95,
+  "logo_placement": "top-left",
+  "logo_height": 0.34,
+  "logo_margin": 0.025,
+  "logo_opacity": 1.0,
+  "max_fields": 6,
+  "credit_placement": "top-center",
+  "credit_top_size": 0.024,
+  "credit_margin": 0.03,
+  "credit_box_opacity": 0.55,
+  "credit_box_pad": 0.85,
+  "credit_box_radius": 1.0,
+  "annotation_opacity": 1.0
 }

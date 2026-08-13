@@ -1,4 +1,4 @@
-# towercam
+# rattlecam
 
 Composites a logo, weather data and conditions text onto stills pulled from a
 UniFi Protect camera, for a public website and for hand-off to news outlets.
@@ -29,6 +29,14 @@ Layout lives in `theme.json`, not in Go constants, so the serve mode re-reads
 it per request — no rebuild between tweaks. Every value is a ratio (bar height
 as a fraction of image height, everything else as a fraction of bar height), so
 a theme tuned at 1080p renders identically at 4K.
+
+Data columns are sized from what they contain rather than by dividing the strip
+by the number of fields, because `WNW 48 mph G76` is several times the width of
+`62%` and equal columns collide the first time it blows. `col_gap` sets the
+minimum gutter between them; `col_spread` decides what happens to the space left
+over, from `1` (spread across the whole strip) to `0` (packed against the site
+block), which is mostly a question of how you want `partial` to look. If the
+fields genuinely cannot fit, trailing ones are dropped rather than overprinted.
 
 The built-in scenarios in `internal/wx/synthetic.go` are the cases that break a
 layout you tuned against one pleasant afternoon reading:
@@ -80,11 +88,37 @@ Drop three files in `assets/` (or point the env vars elsewhere):
 
 - `font.ttf`, `font-bold.ttf` — a condensed grotesque reads best in a lower
   third. Inter, Barlow Condensed and Roboto Condensed all work.
-- `logo.png` — transparent PNG, scaled automatically to the bar height.
+- `logo.png` — transparent PNG.
+
+`ANNOTATION_PATH` is a full-frame layer registered to what the lens sees — the
+peak outline and names. It is drawn first, so the bar, the badge and the credit
+all sit on top of it. Because it is aligned to the view rather than merely
+decorative, it must be authored at the camera's aspect ratio: stretched to the
+wrong shape it would point "Mount Si" at a different mountain, so a mismatch
+beyond a percent is a hard error rather than a silent stretch. It may be authored
+at any resolution with that shape; it is scaled once per output size and cached.
+`annotation_opacity` scales it, and values above 1 strengthen a faint file rather
+than clipping.
+
+`CREDIT` is a standing attribution line. `credit_placement` puts it either in the
+bar under the timestamp (`"bar"`), where it is compact but easy to overlook, or
+in its own box at the top of the frame (`"top-center"`). On a tower cam the upper
+third is sky — the one region reliably free of terrain — so a line can sit there
+permanently without ever covering the view. It gets a backing box because sky
+runs from near-white at midday to black overnight and no single text colour
+survives both; at night the box disappears into the dark and the text carries
+itself.
+
+Where the mark goes depends on its shape, and `logo_placement` decides. A wide
+horizontal lockup belongs in the bar (`"bar"`), scaled to the bar height. A tall
+portrait crest does not survive that — squeezed into an 11.5% lower third it
+comes out a sliver a couple of hundred pixels wide with unreadable interior
+text — so give it a corner instead (`"top-left"` and friends) and size it with
+`logo_height`, a fraction of image height. `"none"` omits it.
 
 ```
 go mod tidy
-go build ./cmd/towercam
+go build ./cmd/rattlecam
 ```
 
 ### Getting the Protect credentials
@@ -106,6 +140,27 @@ could then silently substitute the image.
 
 ## Configuration
 
+A variable that is unset (or blank) takes its default. A variable that is *set*
+but unparseable is an error, and every problem is reported at once so one restart
+fixes them all. This matters more than it looks: silently falling back to the
+default would turn `SITE_ELEVATION_M="1,200"` into elevation `0`, which makes the
+pressure reduction a no-op and publishes raw station pressure — a wrong number on
+a public frame with nothing logged anywhere.
+
+`STALE_AFTER` must be positive; zero would switch off the staleness gate
+entirely, which is the one thing that must never happen unattended.
+
+Failures are logged, including fatal ones — a bad environment comes out as a
+structured list of problems rather than a sentence with separators buried in it.
+The single exception is a failure to build the logger itself (`LOG_LEVEL`,
+`LOG_FORMAT`), which cannot be logged and so goes straight to stderr.
+
+The daemon then renders one real frame before entering its loop. Fonts, the
+crest, the annotation's aspect and every placement value in the theme are only
+exercised when a frame is drawn, so without that check a typo fails on every
+frame while the process sits there looking healthy and the feed quietly stops
+advancing.
+
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `PROTECT_HOST` | — | Console address, no scheme |
@@ -116,12 +171,19 @@ could then silently substitute the image.
 | `INFLUX_ORG` / `INFLUX_TOKEN` / `INFLUX_BUCKET` | — / — / `weather` | |
 | `INFLUX_STATION` | *(unset)* | Tempest serial, e.g. `ST-00000512` |
 | `NWS_STATION_ID` | *(unset)* | e.g. `KPAE`; unset hides the conditions line |
-| `NWS_USER_AGENT` | `towercam` | api.weather.gov requires identification |
-| `SITE_NAME` | *(unset)* | Rendered next to the logo |
+| `NWS_USER_AGENT` | `rattlecam` | api.weather.gov requires identification |
+| `SITE_NAME` | *(unset)* | Rendered at the left of the bar |
+| `ANNOTATION_PATH` | `assets/annotation.png` | Registered overlay, e.g. peak outlines; absent at the default path is fine |
+| `CREDIT` | *(unset)* | Standing attribution, e.g. `This view is provided by RSVU`; placed by `credit_placement` |
 | `SITE_ELEVATION_M` | `0` | Required for correct pressure — see below |
 | `THEME_PATH` | *(unset)* | Layout JSON produced by the preview harness |
 | `TZ` | `America/Los_Angeles` | Timestamp display |
-| `OUTPUT_DIR` | `/var/www/towercam` | |
+| `METRICS_ENABLED` | `true` | |
+| `METRICS_EXPORTER` | `prometheus` | `prometheus`, `otlpgrpc` or `otlphttp` |
+| `METRICS_PORT` | `8081` | Serves `/metrics` and `/healthcheck` |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `LOG_FORMAT` | `text` | `text` or `json` |
+| `OUTPUT_DIR` | `/var/www/rattlecam` | |
 | `ARCHIVE_DIR` | *(unset)* | Unset disables archiving |
 | `RETENTION_DAYS` | `0` | `0` keeps archives forever |
 | `JPEG_QUALITY` | `92` | |
@@ -151,6 +213,81 @@ Three things that matter here:
 
 If you enabled `RAPID_WIND` without a separate bucket, `rapid_wind_*` lands in
 the same measurement — hence the explicit field allowlist in `wx/influx.go`.
+
+## Running it in a container
+
+```sh
+docker build -t rattlecam .
+```
+
+The image is distroless and runs as `nonroot` (uid 65532), so `OUTPUT_DIR` has to
+be a volume that user can write to. `docker-compose.yml` wires that up along with
+the Grafana LGTM stack for local metrics.
+
+Assets and `theme.json` are read at runtime rather than embedded, which gives two
+build modes worth knowing apart:
+
+- **Locally**, with fonts and artwork present, `COPY assets/` bakes them in and
+  the image is self-contained.
+- **In CI**, they are gitignored, so the published image ships with only
+  `assets/README.md` and needs the real ones mounted over `/app/assets`. Without
+  them it exits immediately with `overlay: font: stat assets/font.ttf: no such
+  file or directory` — which is the right failure, but it is a startup failure,
+  not a degraded mode.
+
+`TZ` resolves inside the image: `gcr.io/distroless/static-debian12` ships
+`/usr/share/zoneinfo`, so `tzdata` does not need vendoring into the binary. An
+unknown zone still fails loudly at startup rather than silently falling back to
+UTC.
+
+## Development
+
+```sh
+make            # wire up the commit-msg hook and install commitlint
+make test       # go test -race -shuffle=on ./...
+make lint       # golangci-lint, yamllint, hadolint — everything CI runs
+make image      # docker build
+```
+
+Commits must be conventional: semantic-release reads them to decide the next
+version, so a malformed message does not merely look untidy — it produces no
+release, and no release means `upload_image.yml` never fires. The `commit-msg`
+hook and CI both enforce it.
+
+CI installs a TrueType font before running tests. `internal/overlay` renders
+through real font files and skips itself when none is available, and fonts are
+gitignored — so without that step the suite would "pass" by not running. A
+separate step fails the build if any test reports `--- SKIP`.
+
+## Metrics
+
+`METRICS_PORT` serves `/metrics` and `/healthcheck`. Set `METRICS_EXPORTER` to
+`otlpgrpc` to push to a collector instead, configured through the standard
+`OTEL_EXPORTER_OTLP_*` variables; `docker-compose.yml` points that at the
+bundled Grafana LGTM stack.
+
+| Metric | Meaning |
+| --- | --- |
+| `rattlecam_observation_age_seconds` | Age of the weather observation behind the published frame |
+| `rattlecam_publish_age_seconds` | Time since a frame was last written |
+| `rattlecam_frame_fields` | Weather fields on the last frame; `0` means the staleness gate dropped them all |
+| `rattlecam_frames_published_total` | Frames written |
+| `rattlecam_frame_errors_total` | Failed cycles, by `stage` |
+| `rattlecam_influx_errors_total` | By `kind`: `no_data` (silent station) vs `query_failed` (a bug) |
+| `rattlecam_nws_errors_total` | Failed conditions refreshes |
+| `rattlecam_snapshot_duration_seconds` / `rattlecam_influx_duration_seconds` | Latency |
+
+**`rattlecam_observation_age_seconds` is the one that matters.** Everything else
+can look perfect while it climbs: the camera keeps returning stills, the frames
+keep publishing on schedule, and the weather burned into them is hours old. It is
+computed when scraped rather than recorded per frame, so it rises on its own
+while the process sits there looking healthy, and it is seeded at startup so the
+series exists even if Influx was never reachable — a threshold alert cannot fire
+on a metric that was never emitted.
+
+Pair it with `rattlecam_frame_fields`: age climbing with fields at zero is the
+staleness gate working correctly, and age climbing with fields non-zero would
+mean it is not.
 
 ## Serving
 
