@@ -370,13 +370,31 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 		return err
 	}
 
-	for _, out := range []struct {
+	outputs := []struct {
 		name string
 		data []byte
 	}{
 		{"latest.jpg", branded},
 		{"latest-clean.jpg", clean},
-	} {
+	}
+
+	// A narrower copy for websites. The full frame is 4K because outlets want
+	// the resolution; a browser does not, and serving 2 MB per view when 350 kB
+	// is indistinguishable is the largest avoidable cost on the public path.
+	// Deliberately not archived: the archive is masters, and this is derived.
+	if d.cfg.WebWidth > 0 {
+		web, err := d.pub.EncodeScaled(composited, d.cfg.WebWidth)
+		if err != nil {
+			d.metrics.FrameError(ctx, metrics.StageEncode)
+			return err
+		}
+		outputs = append(outputs, struct {
+			name string
+			data []byte
+		}{"latest-web.jpg", web})
+	}
+
+	for _, out := range outputs {
 		// A store failure means the frame reached local disk but not the bucket
 		// viewers read from. That is a stale feed, not a lost frame, so it is
 		// logged and counted rather than aborting the cycle.

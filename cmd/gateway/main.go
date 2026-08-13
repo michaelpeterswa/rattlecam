@@ -108,6 +108,7 @@ func run(log *slog.Logger) error {
 	objects := map[string]string{
 		"/latest.jpg":       key("latest.jpg"),
 		"/latest-clean.jpg": key("latest-clean.jpg"),
+		"/latest-web.jpg":   key("latest-web.jpg"),
 	}
 
 	g, err := gateway.New(source{client}, gateway.Config{
