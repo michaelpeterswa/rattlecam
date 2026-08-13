@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	xdraw "golang.org/x/image/draw"
 )
 
 // Publisher writes the public frame, the clean frame and the archive.
@@ -112,6 +114,32 @@ func (p *Publisher) Encode(img image.Image) ([]byte, error) {
 		return nil, fmt.Errorf("publish: encode: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// EncodeScaled encodes img narrowed to width, keeping its aspect ratio.
+//
+// The published frame is 4K because outlets composite their own graphics onto
+// it and want the resolution. A web page does not: at 1280 wide the same frame
+// is a fraction of the bytes and indistinguishable in a browser, which is the
+// difference between a page costing megabytes per view and costing hundreds of
+// kilobytes.
+//
+// It never enlarges. Asking for more pixels than the camera produced would cost
+// bytes to invent detail that is not there.
+func (p *Publisher) EncodeScaled(img image.Image, width int) ([]byte, error) {
+	b := img.Bounds()
+	if width <= 0 || width >= b.Dx() || b.Dx() == 0 {
+		return p.Encode(img)
+	}
+
+	height := int(float64(b.Dy()) * float64(width) / float64(b.Dx()))
+	if height < 1 {
+		height = 1
+	}
+
+	dst := image.NewRGBA(image.Rect(0, 0, width, height))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
+	return p.Encode(dst)
 }
 
 // WriteAtomic writes name into dir via a temp file and a rename.

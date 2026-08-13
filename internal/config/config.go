@@ -41,9 +41,13 @@ type Config struct {
 	AnnotationPath string
 	ThemePath      string
 	JPEGQuality    int
-	OutputDir      string
-	ArchiveDir     string // empty disables archiving
-	RetentionDays  int
+
+	// WebWidth publishes an extra, narrower copy of the branded frame for
+	// websites. Zero disables it.
+	WebWidth      int
+	OutputDir     string
+	ArchiveDir    string // empty disables archiving
+	RetentionDays int
 
 	// Object storage. GCSBucket empty disables it entirely and publishing stays
 	// local-only.
@@ -104,6 +108,7 @@ func Load() (*Config, error) {
 		AnnotationPath: l.str("ANNOTATION_PATH", "assets/annotation.png"),
 		ThemePath:      l.str("THEME_PATH", ""),
 		JPEGQuality:    l.int("JPEG_QUALITY", 92),
+		WebWidth:       l.int("WEB_WIDTH", 1280),
 		OutputDir:      l.str("OUTPUT_DIR", "/var/www/rattlecam"),
 		ArchiveDir:     l.str("ARCHIVE_DIR", ""),
 		RetentionDays:  l.int("RETENTION_DAYS", 0),
@@ -152,6 +157,9 @@ func Load() (*Config, error) {
 
 	if c.JPEGQuality < 1 || c.JPEGQuality > 100 {
 		l.fail("JPEG_QUALITY: %d is outside 1..100", c.JPEGQuality)
+	}
+	if c.WebWidth < 0 || c.WebWidth > 8192 {
+		l.fail("WEB_WIDTH: %d is outside 0..8192 (0 disables the web copy)", c.WebWidth)
 	}
 	if c.SpoolMaxBytes < 0 {
 		l.fail("SPOOL_MAX_BYTES: %d is negative", c.SpoolMaxBytes)

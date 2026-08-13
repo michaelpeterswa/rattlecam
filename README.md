@@ -85,6 +85,7 @@ Three artifacts per cycle:
 | --- | --- |
 | `latest.jpg` | Branded, overlaid — the public frame |
 | `latest-clean.jpg` | Unbranded, for outlets applying their own graphics — the camera's own bytes, unmodified |
+| `latest-web.jpg` | The branded frame narrowed to `WEB_WIDTH`, for websites. Not archived |
 | `archive/YYYY/MM/DD/HHMMSS.jpg` | Clean master, for timelapses later |
 
 All writes go temp-file → `rename`, so a web server never serves a torn frame.
@@ -200,6 +201,7 @@ advancing.
 | `ARCHIVE_DIR` | *(unset)* | Unset disables archiving |
 | `RETENTION_DAYS` | `0` | `0` keeps archives forever |
 | `JPEG_QUALITY` | `92` | Applies to the branded frame only; the clean master is passed through |
+| `WEB_WIDTH` | `1280` | Width of the extra copy for websites; `0` disables it |
 | `POLL_INTERVAL` | `15s` | How often Influx is asked for a newer observation |
 | `MIN_FRAME_GAP` | `55s` | Floor between frames |
 | `MAX_FRAME_AGE` | `3m` | Render anyway after this long. Checked once per poll, so a value below `POLL_INTERVAL` cannot fire and is clamped to it with a warning. |
@@ -357,6 +359,31 @@ Two details that are easy to get wrong:
 
 Authentication is Application Default Credentials: the metadata server on GCP,
 or `GOOGLE_APPLICATION_CREDENTIALS` pointing at a key file on an on-premise host.
+
+### Serving it on a page
+
+Use a plain `<img>`, not an iframe, and point it at `latest-web.jpg`. The full
+frame is 4K because outlets composite their own graphics onto it; a browser does
+not need that:
+
+| Width | Size |
+| --- | --- |
+| 3840 | 2170 kB |
+| 1920 | 781 kB |
+| **1280** | **345 kB** |
+
+The frame carries an `ETag`, so a refresh that finds nothing new costs a 304 of a
+few hundred bytes. **A cache-busting query string throws that away** — every
+request becomes a full transfer, which at a hundred viewers a minute is the whole
+reason the gateway exists, undone. Refresh by re-fetching the same URL:
+
+```js
+const res = await fetch('https://cam.example.com/latest-web.jpg', { cache: 'no-cache' });
+img.src = URL.createObjectURL(await res.blob());
+```
+
+`cache: no-cache` still sends `If-None-Match`; it means "revalidate", not "do not
+cache". Sixty seconds matches the publish cadence — polling faster only buys 304s.
 
 ## The gateway
 

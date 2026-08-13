@@ -1,10 +1,14 @@
 package publish
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/jpeg"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -274,5 +278,74 @@ func TestQueueFailureIsAStoreError(t *testing.T) {
 	}
 	if !errors.Is(err, ErrStore) {
 		t.Errorf("error %v does not wrap ErrStore", err)
+	}
+}
+
+// The web copy exists to be small. Anything that quietly stopped scaling would
+// serve 2 MB where 350 kB was intended, and nothing about the output would say
+// so.
+func TestEncodeScaledNarrowsTheFrame(t *testing.T) {
+	p := &Publisher{Quality: 92}
+	src := image.NewRGBA(image.Rect(0, 0, 3840, 2160))
+
+	data, err := p.EncodeScaled(src, 1280)
+	if err != nil {
+		t.Fatalf("EncodeScaled: %v", err)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := img.Bounds(); got.Dx() != 1280 || got.Dy() != 720 {
+		t.Errorf("bounds = %v, want 1280x720 (aspect preserved)", got)
+	}
+}
+
+// Asking for more pixels than the camera produced would spend bytes inventing
+// detail that is not there.
+func TestEncodeScaledNeverEnlarges(t *testing.T) {
+	p := &Publisher{Quality: 92}
+	src := image.NewRGBA(image.Rect(0, 0, 640, 360))
+
+	for _, w := range []int{1280, 640} {
+		data, err := p.EncodeScaled(src, w)
+		if err != nil {
+			t.Fatalf("EncodeScaled(%d): %v", w, err)
+		}
+		img, _ := jpeg.Decode(bytes.NewReader(data))
+		if got := img.Bounds().Dx(); got != 640 {
+			t.Errorf("width %d requested, got %d; want the original 640", w, got)
+		}
+	}
+}
+
+func TestEncodeScaledZeroWidthIsFullSize(t *testing.T) {
+	p := &Publisher{Quality: 92}
+	src := image.NewRGBA(image.Rect(0, 0, 800, 450))
+
+	data, err := p.EncodeScaled(src, 0)
+	if err != nil {
+		t.Fatalf("EncodeScaled: %v", err)
+	}
+	img, _ := jpeg.Decode(bytes.NewReader(data))
+	if got := img.Bounds().Dx(); got != 800 {
+		t.Errorf("width = %d, want the full 800", got)
+	}
+}
+
+// The archive is masters. A derived, downscaled copy has no place in it, and
+// archiving one would roughly double storage for something regenerable.
+func TestArchiveNeverCarriesTheWebCopy(t *testing.T) {
+	store := newFakeStore()
+	p := &Publisher{Quality: 92, Store: store, ArchiveToStore: true}
+
+	ts := time.Date(2026, 3, 9, 7, 5, 4, 0, time.UTC)
+	if err := p.Archive(context.Background(), ts, []byte("master")); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range store.names() {
+		if strings.Contains(n, "web") {
+			t.Errorf("the archive contains a web copy: %s", n)
+		}
 	}
 }
