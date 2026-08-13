@@ -29,6 +29,7 @@ import (
 	_ "image/gif"
 
 	"github.com/michaelpeterswa/rattlecam/internal/frame"
+	"github.com/michaelpeterswa/rattlecam/internal/light"
 	"github.com/michaelpeterswa/rattlecam/internal/overlay"
 	"github.com/michaelpeterswa/rattlecam/internal/wx"
 )
@@ -53,6 +54,7 @@ func main() {
 		tz         = flag.String("tz", "America/Los_Angeles", "timezone for the timestamp")
 		staleAfter = flag.Duration("stale-after", 10*time.Minute, "observations older than this drop out")
 		serveAddr  = flag.String("serve", "", "serve a live-reloading preview on this address")
+		night      = flag.String("night", "auto", "night treatment: auto (measure the still, as the daemon does), on, or off")
 	)
 	flag.Parse()
 
@@ -105,11 +107,19 @@ func main() {
 		}
 	}
 
+	isNight, err := resolveNight(*night, src, light.DefaultEnter, light.DefaultExit)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("still measures %.1f mean luma; rendering the %s treatment",
+		light.MeanLuma(src), map[bool]string{true: "night", false: "day"}[isNight])
+
 	h := &harness{
 		src:       src,
 		renderer:  renderer,
 		themePath: *themePath,
 		list:      list,
+		night:     isNight,
 		params: frame.Params{
 			SiteName:   *site,
 			Credit:     *credit,
@@ -170,6 +180,28 @@ type harness struct {
 	themePath string
 	list      []wx.Scenario
 	params    frame.Params
+	night     bool
+}
+
+// resolveNight turns the -night flag into a decision.
+//
+// "auto" measures the still exactly as the daemon measures each frame, so
+// pointing the harness at a night capture shows the night treatment without
+// anyone having to know that is what they are looking at. The explicit settings
+// exist to force the other treatment onto the same still for comparison.
+func resolveNight(mode string, src image.Image, enter, exit float64) (bool, error) {
+	switch mode {
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	case "auto":
+		d := light.Detector{Enter: enter, Exit: exit}
+		night, _ := d.Observe(light.MeanLuma(src))
+		return night, nil
+	default:
+		return false, fmt.Errorf("-night: %q is not auto, on or off", mode)
+	}
 }
 
 func (h *harness) find(name string) (wx.Scenario, error) {
@@ -188,6 +220,7 @@ func (h *harness) render(name string) (image.Image, error) {
 	}
 	now := time.Now()
 	f := frame.Build(h.params, s.Reading(now), s.Conditions, now)
+	f.Night = h.night
 	return h.renderer.Render(h.src, f)
 }
 

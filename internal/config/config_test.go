@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/michaelpeterswa/rattlecam/internal/light"
 )
 
 // setRequired satisfies the five mandatory variables so a test can focus on
@@ -91,6 +93,69 @@ func TestMalformedValuesRejected(t *testing.T) {
 		{"POLL_INTERVAL", "15"}, // no unit
 		{"MAX_FRAME_AGE", "3 min"},
 		{"STALE_AFTER", "ten"},
+	} {
+		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv(tc.key, tc.val)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s=%q was accepted", tc.key, tc.val)
+			} else if !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("error does not name %s:\n%v", tc.key, err)
+			}
+		})
+	}
+}
+
+func TestNightDefaults(t *testing.T) {
+	setRequired(t)
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.NightEnter != light.DefaultEnter || c.NightExit != light.DefaultExit {
+		t.Errorf("thresholds = %g/%g, want %g/%g",
+			c.NightEnter, c.NightExit, light.DefaultEnter, light.DefaultExit)
+	}
+	if !c.NightInvert {
+		t.Error("NIGHT_INVERT_ANNOTATION defaulted off; inverting after dark is the point of the feature")
+	}
+	if c.NightArchive {
+		t.Error("NIGHT_ARCHIVE defaulted on; night masters are the bulk of the archive and make no timelapse")
+	}
+}
+
+// The band has to be a band. Equal thresholds are a single threshold, which
+// flaps through dusk; inverted ones latch night on permanently. Neither can be
+// allowed to start, because both look fine until it gets dark.
+func TestNightThresholdsMustBeOrdered(t *testing.T) {
+	for _, tc := range []struct{ name, enter, exit string }{
+		{"equal", "40", "40"},
+		{"inverted", "60", "30"},
+		{"exit just below enter", "35", "34.9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("NIGHT_ENTER_LUMA", tc.enter)
+			t.Setenv("NIGHT_EXIT_LUMA", tc.exit)
+
+			if _, err := Load(); err == nil {
+				t.Fatalf("enter=%s exit=%s was accepted", tc.enter, tc.exit)
+			} else if !strings.Contains(err.Error(), "NIGHT_EXIT_LUMA") {
+				t.Errorf("error does not name NIGHT_EXIT_LUMA:\n%v", err)
+			}
+		})
+	}
+}
+
+// Luma is a 0-255 mean, so a threshold outside it can never be crossed.
+func TestNightThresholdsMustBeInRange(t *testing.T) {
+	for _, tc := range []struct{ key, val string }{
+		{"NIGHT_ENTER_LUMA", "-1"},
+		{"NIGHT_ENTER_LUMA", "300"},
+		{"NIGHT_EXIT_LUMA", "256"},
+		{"NIGHT_ENTER_LUMA", "dark"},
 	} {
 		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
 			setRequired(t)

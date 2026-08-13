@@ -18,6 +18,7 @@ import (
 	"github.com/michaelpeterswa/rattlecam/internal/config"
 	"github.com/michaelpeterswa/rattlecam/internal/frame"
 	"github.com/michaelpeterswa/rattlecam/internal/gcs"
+	"github.com/michaelpeterswa/rattlecam/internal/light"
 	"github.com/michaelpeterswa/rattlecam/internal/metrics"
 	"github.com/michaelpeterswa/rattlecam/internal/nws"
 	"github.com/michaelpeterswa/rattlecam/internal/overlay"
@@ -216,6 +217,7 @@ func run(log *slog.Logger) error {
 		metrics: m,
 		drainer: drainer,
 		params:  params,
+		night:   light.Detector{Enter: cfg.NightEnter, Exit: cfg.NightExit},
 	}
 	d.loop(ctx)
 	return nil
@@ -236,6 +238,11 @@ type daemon struct {
 	lastObserved time.Time // observation time of the last reading we rendered
 	lastRender   time.Time
 	lastGood     *wx.Reading // survives an Influx outage
+
+	// night is measured from each frame rather than from a clock. One state
+	// drives both the annotation's colour and whether the master is archived, so
+	// the two can never disagree about what time of day it is.
+	night light.Detector
 
 	warnedElevation bool
 }
@@ -359,6 +366,22 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 	}
 	f := frame.Build(d.params, d.lastGood, conditions, now)
 
+	// Measured off the frame we are about to publish, so the treatment always
+	// matches the picture it is drawn on rather than trailing it by one cycle.
+	luma := light.MeanLuma(still.Image)
+	night, changed := d.night.Observe(luma)
+	d.metrics.Night(ctx, night, luma)
+	if changed {
+		d.log.Info("light level crossed the night threshold",
+			"night", night, "luma", math.Round(luma*10)/10,
+			"enter_below", d.cfg.NightEnter, "exit_above", d.cfg.NightExit)
+	}
+
+	// The annotation is black ink and vanishes against a night sky, so after
+	// dark it is drawn inverted. NIGHT_INVERT_ANNOTATION=false keeps the daytime
+	// treatment around the clock without disturbing the archive decision below.
+	f.Night = night && d.cfg.NightInvert
+
 	composited, err := d.renderer.Render(still.Image, f)
 	if err != nil {
 		d.metrics.FrameError(ctx, metrics.StageRender)
@@ -409,13 +432,20 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 		}
 	}
 
-	if err := d.pub.Archive(ctx, now, clean); err != nil {
-		// Archiving is for timelapses later; failing it must not stop the feed.
-		d.log.Warn("archive failed", "error", err)
-		if errors.Is(err, publish.ErrStore) {
-			d.metrics.StoreError(ctx)
-		} else {
-			d.metrics.FrameError(ctx, metrics.StageArchive)
+	// The archive exists to make timelapses. A night's worth of near-black
+	// masters contributes nothing to one and is the bulk of what the tower
+	// uploads and the bucket stores, so it is skipped unless NIGHT_ARCHIVE asks
+	// for it. The live frame keeps publishing either way — only the archive
+	// pauses, and everything below still runs.
+	if !night || d.cfg.NightArchive {
+		if err := d.pub.Archive(ctx, now, clean); err != nil {
+			// Archiving is for timelapses later; failing it must not stop the feed.
+			d.log.Warn("archive failed", "error", err)
+			if errors.Is(err, publish.ErrStore) {
+				d.metrics.StoreError(ctx)
+			} else {
+				d.metrics.FrameError(ctx, metrics.StageArchive)
+			}
 		}
 	}
 
@@ -499,9 +529,17 @@ func selfTest(ctx context.Context, cam *protect.Client, r *overlay.Renderer, p f
 		return fmt.Errorf("startup render check: %w", err)
 	}
 
+	// Both treatments, because the night one first runs unattended at dusk and a
+	// check that only covers daylight would let a broken inversion reach the
+	// published frame hours after anyone was watching. The second render costs
+	// one extra resample of the annotation at startup.
 	now := time.Now()
-	if _, err := r.Render(still.Image, frame.Build(p, sc.Reading(now), sc.Conditions, now)); err != nil {
-		return fmt.Errorf("startup render check: %w", err)
+	for _, night := range []bool{false, true} {
+		f := frame.Build(p, sc.Reading(now), sc.Conditions, now)
+		f.Night = night
+		if _, err := r.Render(still.Image, f); err != nil {
+			return fmt.Errorf("startup render check (night=%v): %w", night, err)
+		}
 	}
 	return nil
 }

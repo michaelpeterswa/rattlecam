@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+
+	"github.com/michaelpeterswa/rattlecam/internal/light"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +43,19 @@ type Config struct {
 	AnnotationPath string
 	ThemePath      string
 	JPEGQuality    int
+
+	// Night. The state is measured from the frame's own mean luma rather than a
+	// clock, because what matters is whether black ink is still visible, and
+	// overcast, smoke and the camera's own exposure move that hours either side
+	// of sunset.
+	//
+	// NightEnter and NightExit are a hysteresis band on a 0-255 scale. Real
+	// frames from this site measure around 10 at night and above 100 in daylight,
+	// so the defaults sit in the empty middle with room on both sides.
+	NightEnter   float64
+	NightExit    float64
+	NightInvert  bool // draw the annotation in white after dark
+	NightArchive bool // keep archiving through the night
 
 	// WebWidth publishes an extra, narrower copy of the branded frame for
 	// websites. Zero disables it.
@@ -108,10 +123,16 @@ func Load() (*Config, error) {
 		AnnotationPath: l.str("ANNOTATION_PATH", "assets/annotation.png"),
 		ThemePath:      l.str("THEME_PATH", ""),
 		JPEGQuality:    l.int("JPEG_QUALITY", 92),
-		WebWidth:       l.int("WEB_WIDTH", 1280),
-		OutputDir:      l.str("OUTPUT_DIR", "/var/www/rattlecam"),
-		ArchiveDir:     l.str("ARCHIVE_DIR", ""),
-		RetentionDays:  l.int("RETENTION_DAYS", 0),
+
+		NightEnter:   l.float("NIGHT_ENTER_LUMA", light.DefaultEnter),
+		NightExit:    l.float("NIGHT_EXIT_LUMA", light.DefaultExit),
+		NightInvert:  l.bool("NIGHT_INVERT_ANNOTATION", true),
+		NightArchive: l.bool("NIGHT_ARCHIVE", false),
+
+		WebWidth:      l.int("WEB_WIDTH", 1280),
+		OutputDir:     l.str("OUTPUT_DIR", "/var/www/rattlecam"),
+		ArchiveDir:    l.str("ARCHIVE_DIR", ""),
+		RetentionDays: l.int("RETENTION_DAYS", 0),
 
 		GCSBucket:       l.str("GCS_BUCKET", ""),
 		GCSPrefix:       l.str("GCS_PREFIX", ""),
@@ -166,6 +187,27 @@ func Load() (*Config, error) {
 	}
 	if c.RetentionDays < 0 {
 		l.fail("RETENTION_DAYS: %d is negative (0 keeps archives forever)", c.RetentionDays)
+	}
+
+	// Luma is a 0-255 mean, so a threshold outside that can never be crossed:
+	// too high and every frame is night forever, too low and none ever is.
+	for _, n := range []struct {
+		key string
+		val float64
+	}{
+		{"NIGHT_ENTER_LUMA", c.NightEnter},
+		{"NIGHT_EXIT_LUMA", c.NightExit},
+	} {
+		if n.val < 0 || n.val > 255 {
+			l.fail("%s: %g is outside 0..255", n.key, n.val)
+		}
+	}
+	// Equal thresholds are a single threshold, which flaps: dusk sits on the
+	// boundary and the annotation's colour flips back and forth every poll.
+	// Inverted ones are worse — night would latch on and never release.
+	if c.NightExit <= c.NightEnter {
+		l.fail("NIGHT_EXIT_LUMA (%g) must be above NIGHT_ENTER_LUMA (%g); they are a hysteresis band, and without a gap between them the night state would flip on every poll through dusk",
+			c.NightExit, c.NightEnter)
 	}
 
 	// POLL_INTERVAL drives a time.Ticker, which panics on a non-positive

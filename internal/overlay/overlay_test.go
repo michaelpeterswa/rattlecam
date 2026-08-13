@@ -1,6 +1,7 @@
 package overlay
 
 import (
+	"bytes"
 	"errors"
 	"image"
 	"image/color"
@@ -365,11 +366,11 @@ func TestAnnotationCachedAcrossFrames(t *testing.T) {
 	}
 	b := srcImage().Bounds()
 
-	first, err := r.scaledAnnotation(b, 1)
+	first, err := r.scaledAnnotation(b, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := r.scaledAnnotation(b, 1)
+	second, err := r.scaledAnnotation(b, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +379,7 @@ func TestAnnotationCachedAcrossFrames(t *testing.T) {
 	}
 
 	// A different strength must invalidate it.
-	third, err := r.scaledAnnotation(b, 0.5)
+	third, err := r.scaledAnnotation(b, 0.5, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +395,7 @@ func TestSetThemeInvalidatesAnnotationCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	b := srcImage().Bounds()
-	if _, err := r.scaledAnnotation(b, 1); err != nil {
+	if _, err := r.scaledAnnotation(b, 1, false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -407,13 +408,153 @@ func TestSetThemeInvalidatesAnnotationCache(t *testing.T) {
 	}
 }
 
+// The arithmetic the night treatment rests on. In premultiplied space the
+// inversion is a-v, and getting it wrong by reaching for 255-v would lift every
+// transparent pixel off the floor and fog the entire frame.
+func TestInvertRGBIsExactInPremultipliedSpace(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		in         [4]uint8 // R,G,B,A premultiplied
+		want       [3]uint8
+		wantReason string
+	}{
+		{"black ink becomes white ink", [4]uint8{0, 0, 0, 90}, [3]uint8{90, 90, 90},
+			"a fully opaque-to-its-alpha white is v == a"},
+		{"white ink becomes black ink", [4]uint8{90, 90, 90, 90}, [3]uint8{0, 0, 0}, ""},
+		{"fully transparent stays transparent", [4]uint8{0, 0, 0, 0}, [3]uint8{0, 0, 0},
+			"255-v here would paint white over the whole frame"},
+		{"mid grey at full alpha", [4]uint8{100, 100, 100, 255}, [3]uint8{155, 155, 155}, ""},
+		{"channels invert independently", [4]uint8{200, 100, 0, 200}, [3]uint8{0, 100, 200}, ""},
+		{"resampling overshoot clamps", [4]uint8{200, 150, 120, 100}, [3]uint8{0, 0, 0},
+			"v > a is not a valid premultiplied pixel; it must not wrap"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+			copy(img.Pix, tc.in[:])
+
+			invertRGB(img)
+
+			got := [3]uint8{img.Pix[0], img.Pix[1], img.Pix[2]}
+			if got != tc.want {
+				t.Errorf("invertRGB(%v) RGB = %v, want %v  %s", tc.in, got, tc.want, tc.wantReason)
+			}
+			if img.Pix[3] != tc.in[3] {
+				t.Errorf("alpha changed from %d to %d; the outline's shape must not move",
+					tc.in[3], img.Pix[3])
+			}
+		})
+	}
+}
+
+// Inverting twice must return the original, which only holds if the operation
+// is exact rather than a lossy round-trip through straight colour.
+func TestInvertRGBRoundTrips(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	for i := 0; i < len(img.Pix); i += 4 {
+		a := uint8(i % 256)
+		img.Pix[i] = a / 3
+		img.Pix[i+1] = a / 2
+		img.Pix[i+2] = a
+		img.Pix[i+3] = a
+	}
+	want := make([]uint8, len(img.Pix))
+	copy(want, img.Pix)
+
+	invertRGB(img)
+	invertRGB(img)
+
+	for i := range want {
+		if img.Pix[i] != want[i] {
+			t.Fatalf("byte %d became %d after two inversions, want %d", i, img.Pix[i], want[i])
+		}
+	}
+}
+
+// Night is part of the cache key, so a transition must produce a new layer
+// rather than serving the daytime one until something else invalidates it.
+func TestNightAnnotationIsCachedSeparately(t *testing.T) {
+	r := testRenderer(t, DefaultTheme(), true)
+	if err := r.LoadAnnotation(writeAnnotation(t, 1920, 1080)); err != nil {
+		t.Fatal(err)
+	}
+	b := srcImage().Bounds()
+
+	day, err := r.scaledAnnotation(b, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dayPix := make([]uint8, len(day.Pix))
+	copy(dayPix, day.Pix)
+
+	night, err := r.scaledAnnotation(b, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(night.Pix, dayPix) {
+		t.Fatal("the night layer is identical to the day one; the inversion did not happen")
+	}
+
+	// And back again — the day layer must come back as it was, not stay inverted.
+	again, err := r.scaledAnnotation(b, 1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again.Pix, dayPix) {
+		t.Error("returning to day did not restore the original layer")
+	}
+}
+
+// The premultiplied invariant has to survive inversion combined with a strength
+// boost, since that is the one path where two clamps interact.
+func TestNightAnnotationHoldsThePremultipliedInvariant(t *testing.T) {
+	r := testRenderer(t, DefaultTheme(), true)
+	if err := r.LoadAnnotation(writeAnnotation(t, 640, 360)); err != nil {
+		t.Fatal(err)
+	}
+	layer, err := r.scaledAnnotation(srcImage().Bounds(), 4, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len(layer.Pix); i += 4 {
+		a := layer.Pix[i+3]
+		for c := range 3 {
+			if layer.Pix[i+c] > a {
+				t.Fatalf("premultiplied channel %d (%d) exceeds alpha (%d)", c, layer.Pix[i+c], a)
+			}
+		}
+	}
+}
+
+// End to end: the flag on the Frame has to actually reach the rendered pixels.
+func TestRenderNightDiffersFromDay(t *testing.T) {
+	r := testRenderer(t, DefaultTheme(), true)
+	if err := r.LoadAnnotation(writeAnnotation(t, 1920, 1080)); err != nil {
+		t.Fatal(err)
+	}
+
+	f := sampleFrame()
+	day, err := r.Render(srcImage(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Night = true
+	night, err := r.Render(srcImage(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bytes.Equal(day.(*image.RGBA).Pix, night.(*image.RGBA).Pix) {
+		t.Error("Frame.Night made no difference to the rendered frame")
+	}
+}
+
 // Opacity above 1 strengthens a faint layer; nothing may wrap around.
 func TestAnnotationOpacityAboveOneClamps(t *testing.T) {
 	r := testRenderer(t, DefaultTheme(), true)
 	if err := r.LoadAnnotation(writeAnnotation(t, 640, 360)); err != nil {
 		t.Fatal(err)
 	}
-	layer, err := r.scaledAnnotation(srcImage().Bounds(), 4)
+	layer, err := r.scaledAnnotation(srcImage().Bounds(), 4, false)
 	if err != nil {
 		t.Fatal(err)
 	}

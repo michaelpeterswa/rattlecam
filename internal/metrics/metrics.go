@@ -41,6 +41,8 @@ type Metrics struct {
 	storeErrors     metric.Int64Counter
 	spoolEntries    metric.Int64Gauge
 	spoolBytes      metric.Int64Gauge
+	nightState      metric.Int64Gauge
+	frameLuma       metric.Float64Gauge
 
 	// Unix nanoseconds, zero meaning "has not happened yet". Read from the
 	// collection callback on another goroutine, hence atomic.
@@ -139,6 +141,23 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Bytes held on disk waiting to upload; approaches SPOOL_MAX_BYTES before eviction starts."),
 	); err != nil {
 		return nil, fmt.Errorf("metrics: spool.bytes: %w", err)
+	}
+
+	if m.nightState, err = meter.Int64Gauge(
+		"rattlecam.night",
+		metric.WithDescription("1 while the daemon considers it night: the annotation is drawn inverted and masters are not archived."),
+	); err != nil {
+		return nil, fmt.Errorf("metrics: night: %w", err)
+	}
+
+	// The raw measurement behind the flag. Without it a threshold that is wrong
+	// for this camera looks identical to a night that simply is not falling —
+	// graphed, the daily curve makes the right values obvious.
+	if m.frameLuma, err = meter.Float64Gauge(
+		"rattlecam.frame.luma",
+		metric.WithDescription("Mean luma of the most recent frame, 0-255. Compare against NIGHT_ENTER_LUMA and NIGHT_EXIT_LUMA."),
+	); err != nil {
+		return nil, fmt.Errorf("metrics: frame.luma: %w", err)
 	}
 
 	// These two are deliberately observable rather than set at publish time.
@@ -243,6 +262,16 @@ func (m *Metrics) StoreError(ctx context.Context) {
 func (m *Metrics) Spool(ctx context.Context, entries int, bytes int64) {
 	m.spoolEntries.Record(ctx, int64(entries))
 	m.spoolBytes.Record(ctx, bytes)
+}
+
+// Night records the current night state and the luma it was derived from.
+func (m *Metrics) Night(ctx context.Context, night bool, luma float64) {
+	var v int64
+	if night {
+		v = 1
+	}
+	m.nightState.Record(ctx, v)
+	m.frameLuma.Record(ctx, luma)
 }
 
 // NWSError records a failed conditions refresh.
