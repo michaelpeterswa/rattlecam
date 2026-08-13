@@ -45,6 +45,13 @@ type Config struct {
 	ArchiveDir     string // empty disables archiving
 	RetentionDays  int
 
+	// Object storage. GCSBucket empty disables it entirely and publishing stays
+	// local-only.
+	GCSBucket       string
+	GCSPrefix       string
+	GCSArchive      bool
+	GCSCacheControl string
+
 	// Observability
 	MetricsEnabled  bool
 	MetricsExporter string // prometheus, otlpgrpc or otlphttp
@@ -56,6 +63,11 @@ type Config struct {
 	MaxFrameAge  time.Duration // force a frame even with no new data
 	StaleAfter   time.Duration // observations older than this are not rendered
 	NWSInterval  time.Duration
+
+	// Warnings are settings that were accepted but adjusted, or that will not
+	// do what they look like they do. Not fatal, but the operator should see
+	// them rather than discover the behaviour later.
+	Warnings []string
 }
 
 func Load() (*Config, error) {
@@ -90,6 +102,11 @@ func Load() (*Config, error) {
 		OutputDir:      l.str("OUTPUT_DIR", "/var/www/rattlecam"),
 		ArchiveDir:     l.str("ARCHIVE_DIR", ""),
 		RetentionDays:  l.int("RETENTION_DAYS", 0),
+
+		GCSBucket:       l.str("GCS_BUCKET", ""),
+		GCSPrefix:       l.str("GCS_PREFIX", ""),
+		GCSArchive:      l.bool("GCS_ARCHIVE", true),
+		GCSCacheControl: l.str("GCS_CACHE_CONTROL", "no-cache, max-age=0, must-revalidate"),
 
 		MetricsEnabled:  l.bool("METRICS_ENABLED", true),
 		MetricsExporter: l.str("METRICS_EXPORTER", "prometheus"),
@@ -154,6 +171,18 @@ func Load() (*Config, error) {
 		l.fail("MIN_FRAME_GAP: must not be negative, got %s", c.MinFrameGap)
 	}
 
+	// MAX_FRAME_AGE is only ever evaluated inside a poll tick, so it cannot
+	// force a frame sooner than POLL_INTERVAL no matter how low it is set.
+	// Left alone it would sit there looking like a three-minute guarantee while
+	// quietly delivering whatever the poll interval allows, so it is clamped to
+	// the value it actually behaves as.
+	if c.MaxFrameAge > 0 && c.PollInterval > 0 && c.MaxFrameAge < c.PollInterval {
+		l.warn("MAX_FRAME_AGE (%s) is below POLL_INTERVAL (%s); it is checked once per poll, so it cannot force a frame any sooner. Clamped to %s.",
+			c.MaxFrameAge, c.PollInterval, c.PollInterval)
+		c.MaxFrameAge = c.PollInterval
+	}
+	c.Warnings = slices.Clone(l.warnings)
+
 	if err := l.err(); err != nil {
 		return nil, err
 	}
@@ -163,10 +192,18 @@ func Load() (*Config, error) {
 // loader reads the environment, collecting every problem instead of stopping at
 // the first. Someone bringing up a deployment wants the whole list, not one
 // error per restart.
-type loader struct{ problems []string }
+type loader struct {
+	problems []string
+	warnings []string
+}
 
 func (l *loader) fail(format string, args ...any) {
 	l.problems = append(l.problems, fmt.Sprintf(format, args...))
+}
+
+// warn records something the operator should see but that does not stop startup.
+func (l *loader) warn(format string, args ...any) {
+	l.warnings = append(l.warnings, fmt.Sprintf(format, args...))
 }
 
 func (l *loader) err() error {

@@ -4,22 +4,75 @@ package publish
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/jpeg"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Publisher writes the public frame, the clean frame and the archive.
 type Publisher struct {
 	OutputDir     string
-	ArchiveDir    string // empty disables archiving
+	ArchiveDir    string // empty disables local archiving
 	Quality       int
-	RetentionDays int // 0 keeps archives forever
+	RetentionDays int // 0 keeps local archives forever
+
+	// Store, when set, receives every frame in addition to the local copy.
+	// Local stays the source of truth so that losing the bucket degrades the
+	// feed to "stale" rather than stopping it.
+	Store          ObjectStore
+	ObjectPrefix   string // optional key prefix inside the bucket
+	CacheControl   string // applied to the latest-* objects
+	ArchiveToStore bool
+}
+
+// defaultCacheControl keeps a stable URL from serving a stale frame. A bucket's
+// own default is public, max-age=3600, which for a file that changes every
+// minute is exactly wrong.
+const defaultCacheControl = "no-cache, max-age=0, must-revalidate"
+
+func (p *Publisher) cacheControl() string {
+	if p.CacheControl == "" {
+		return defaultCacheControl
+	}
+	return p.CacheControl
+}
+
+// object applies the configured prefix to a key. Object names always use
+// forward slashes, whatever the local filesystem does.
+func (p *Publisher) object(name string) string {
+	name = filepath.ToSlash(name)
+	if p.ObjectPrefix == "" {
+		return name
+	}
+	return path.Join(strings.Trim(p.ObjectPrefix, "/"), name)
+}
+
+// Publish writes a frame to the output directory and, when a store is
+// configured, uploads it as well.
+//
+// The local write happens first and its failure is returned plainly. A store
+// failure comes back wrapping ErrStore, so a caller can log it and carry on:
+// the frame is on disk, and the feed being a minute stale beats the daemon
+// treating the whole cycle as lost.
+func (p *Publisher) Publish(ctx context.Context, name string, data []byte) error {
+	if err := p.WriteAtomic(p.OutputDir, name, data); err != nil {
+		return err
+	}
+	if p.Store == nil {
+		return nil
+	}
+	return storeErr("put "+name, p.Store.Put(ctx, p.object(name), data, PutOptions{
+		ContentType:  "image/jpeg",
+		CacheControl: p.cacheControl(),
+	}))
 }
 
 func (p *Publisher) quality() int {
@@ -108,14 +161,29 @@ func ArchivePath(t time.Time) (dir, name string) {
 		t.Format("150405") + ".jpg"
 }
 
-// Archive stores the clean master for later timelapses. It is a no-op when
-// ArchiveDir is unset.
-func (p *Publisher) Archive(t time.Time, data []byte) error {
-	if p.ArchiveDir == "" {
+// Archive stores the clean master for later timelapses, locally when
+// ArchiveDir is set and in the object store when ArchiveToStore is on. Either
+// may be disabled independently.
+func (p *Publisher) Archive(ctx context.Context, t time.Time, data []byte) error {
+	sub, name := ArchivePath(t)
+
+	if p.ArchiveDir != "" {
+		if err := p.WriteAtomic(filepath.Join(p.ArchiveDir, sub), name, data); err != nil {
+			return err
+		}
+	}
+
+	if p.Store == nil || !p.ArchiveToStore {
 		return nil
 	}
-	sub, name := ArchivePath(t)
-	return p.WriteAtomic(filepath.Join(p.ArchiveDir, sub), name, data)
+
+	key := p.object(path.Join("archive", filepath.ToSlash(sub), name))
+	// An archived frame is written once under a timestamped name and never
+	// changes, so unlike latest.jpg it can be cached indefinitely.
+	return storeErr("put "+key, p.Store.Put(ctx, key, data, PutOptions{
+		ContentType:  "image/jpeg",
+		CacheControl: "public, max-age=31536000, immutable",
+	}))
 }
 
 // Prune deletes archived days older than RetentionDays. It is a no-op when

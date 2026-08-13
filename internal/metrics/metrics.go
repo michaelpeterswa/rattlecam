@@ -25,6 +25,7 @@ const (
 	StageEncode   = "encode"
 	StagePublish  = "publish"
 	StageArchive  = "archive"
+	StageStore    = "store"
 )
 
 // Metrics holds the instruments and the small amount of state the observable
@@ -37,6 +38,7 @@ type Metrics struct {
 	influxSeconds   metric.Float64Histogram
 	influxErrors    metric.Int64Counter
 	nwsErrors       metric.Int64Counter
+	storeErrors     metric.Int64Counter
 
 	// Unix nanoseconds, zero meaning "has not happened yet". Read from the
 	// collection callback on another goroutine, hence atomic.
@@ -107,6 +109,13 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Failed observation queries, separating a silent station from a broken query."),
 	); err != nil {
 		return nil, fmt.Errorf("metrics: influx.errors: %w", err)
+	}
+
+	if m.storeErrors, err = meter.Int64Counter(
+		"rattlecam.store.errors",
+		metric.WithDescription("Failed uploads to the object store. The frame is on local disk; what viewers read is stale."),
+	); err != nil {
+		return nil, fmt.Errorf("metrics: store.errors: %w", err)
 	}
 
 	if m.nwsErrors, err = meter.Int64Counter(
@@ -204,6 +213,12 @@ func (m *Metrics) InfluxQuery(ctx context.Context, d time.Duration, kind string)
 	if kind != "" {
 		m.influxErrors.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", kind)))
 	}
+}
+
+// StoreError records a failed upload. Separate from FrameError because the
+// frame did land locally: the feed goes stale rather than missing.
+func (m *Metrics) StoreError(ctx context.Context) {
+	m.storeErrors.Add(ctx, 1)
 }
 
 // NWSError records a failed conditions refresh.
