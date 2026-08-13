@@ -72,12 +72,19 @@ seconds of each other. A floor (`MIN_FRAME_GAP`) stops it rendering faster than
 the station reports; a ceiling (`MAX_FRAME_AGE`) forces a frame every few
 minutes so a dead station or a dead Influx can't freeze the published image.
 
+The clean master and the archive are the camera's original JPEG bytes, passed
+through untouched. Decoding and re-encoding them would cost a generation of
+quality and roughly double the size — measured at 1.09 MB from the camera against
+2.1 MB re-encoded at quality 92 — which on a mountain-top link is paid twice,
+once uploading and again for every archived frame kept. Only the branded frame is
+encoded, because it has actually been drawn on.
+
 Three artifacts per cycle:
 
 | File | Contents |
 | --- | --- |
 | `latest.jpg` | Branded, overlaid — the public frame |
-| `latest-clean.jpg` | Unbranded, for outlets applying their own graphics |
+| `latest-clean.jpg` | Unbranded, for outlets applying their own graphics — the camera's own bytes, unmodified |
 | `archive/YYYY/MM/DD/HHMMSS.jpg` | Clean master, for timelapses later |
 
 All writes go temp-file → `rename`, so a web server never serves a torn frame.
@@ -192,7 +199,7 @@ advancing.
 | `SPOOL_MAX_BYTES` | `2147483648` | Backlog cap; oldest archive frames are dropped past it |
 | `ARCHIVE_DIR` | *(unset)* | Unset disables archiving |
 | `RETENTION_DAYS` | `0` | `0` keeps archives forever |
-| `JPEG_QUALITY` | `92` | |
+| `JPEG_QUALITY` | `92` | Applies to the branded frame only; the clean master is passed through |
 | `POLL_INTERVAL` | `15s` | How often Influx is asked for a newer observation |
 | `MIN_FRAME_GAP` | `55s` | Floor between frames |
 | `MAX_FRAME_AGE` | `3m` | Render anyway after this long. Checked once per poll, so a value below `POLL_INTERVAL` cannot fire and is clamped to it with a warning. |

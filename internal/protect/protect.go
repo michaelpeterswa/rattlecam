@@ -3,6 +3,7 @@
 package protect
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -112,8 +113,24 @@ func pinnedVerifier(want []byte) func([][]byte, [][]*x509.Certificate) error {
 	}
 }
 
-// Snapshot fetches a still and decodes it.
-func (c *Client) Snapshot(ctx context.Context, highQuality bool) (image.Image, error) {
+// Still is one snapshot, kept in both forms.
+//
+// Raw matters as much as Image. The camera hands over a finished JPEG, so
+// anything published unmodified should be those bytes rather than a decode and
+// re-encode of them: the round trip is a generational loss and roughly doubles
+// the size for no benefit. Only a frame that has actually been drawn on needs
+// encoding again.
+type Still struct {
+	// Raw is exactly what the camera sent.
+	Raw []byte
+	// Image is Raw decoded, for compositing.
+	Image image.Image
+}
+
+// Snapshot fetches a still and decodes it, keeping the original bytes.
+func (c *Client) Snapshot(ctx context.Context, highQuality bool) (*Still, error) {
+	// highQuality is a string enum in the API; %t emits exactly "true"/"false".
+	// The default is false, which returns a downscaled frame.
 	url := fmt.Sprintf("https://%s%s/cameras/%s/snapshot?highQuality=%t",
 		c.host, apiBase, c.cameraID, highQuality)
 
@@ -132,11 +149,21 @@ func (c *Client) Snapshot(ctx context.Context, highQuality bool) (image.Image, e
 			ct, strings.TrimSpace(string(body)))
 	}
 
-	img, _, err := image.Decode(resp.Body)
+	// A 4K frame is around a megabyte; the cap is generous enough not to
+	// truncate one but still bounds a misbehaving endpoint.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, fmt.Errorf("protect: read snapshot: %w", err)
+	}
+
+	// Decoding is also the check that Raw is a real image, so the bytes handed
+	// on for publishing are known good rather than merely well-labelled.
+	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("protect: decode snapshot: %w", err)
 	}
-	return img, nil
+
+	return &Still{Raw: raw, Image: img}, nil
 }
 
 // Ping checks the camera is reachable and the credentials work, so a bad host,

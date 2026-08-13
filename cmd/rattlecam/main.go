@@ -304,18 +304,19 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 	defer cancel()
 
 	started := time.Now()
-	src, err := d.cam.Snapshot(ctx, true)
+	still, err := d.cam.Snapshot(ctx, true)
 	if err != nil {
 		d.metrics.FrameError(ctx, metrics.StageSnapshot)
 		return err
 	}
 	d.metrics.SnapshotDuration(ctx, time.Since(started))
 
-	clean, err := d.pub.Encode(src)
-	if err != nil {
-		d.metrics.FrameError(ctx, metrics.StageEncode)
-		return err
-	}
+	// The camera already produced a JPEG, and nothing is drawn on the clean
+	// master, so its bytes go out exactly as they arrived. Decoding and
+	// re-encoding them would cost a generation of quality and roughly double
+	// the size — which on this link is paid twice, once uploading and again for
+	// every archived frame kept.
+	clean := still.Raw
 
 	conditions := ""
 	if c := d.conditions.Latest(); c != nil && now.Sub(c.ObservedAt) < 90*time.Minute {
@@ -323,7 +324,7 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 	}
 	f := frame.Build(d.params, d.lastGood, conditions, now)
 
-	composited, err := d.renderer.Render(src, f)
+	composited, err := d.renderer.Render(still.Image, f)
 	if err != nil {
 		d.metrics.FrameError(ctx, metrics.StageRender)
 		return err
@@ -435,18 +436,18 @@ func selfTest(ctx context.Context, cam *protect.Client, r *overlay.Renderer, p f
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	src, err := cam.Snapshot(ctx, true)
+	still, err := cam.Snapshot(ctx, true)
 	if err != nil {
 		return fmt.Errorf("startup render check: %w", err)
 	}
 
-	s, err := wx.ScenarioByName("wide-values")
+	sc, err := wx.ScenarioByName("wide-values")
 	if err != nil {
 		return fmt.Errorf("startup render check: %w", err)
 	}
 
 	now := time.Now()
-	if _, err := r.Render(src, frame.Build(p, s.Reading(now), s.Conditions, now)); err != nil {
+	if _, err := r.Render(still.Image, frame.Build(p, sc.Reading(now), sc.Conditions, now)); err != nil {
 		return fmt.Errorf("startup render check: %w", err)
 	}
 	return nil

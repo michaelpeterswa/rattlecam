@@ -69,12 +69,18 @@ func TestPinnedCertificateAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	img, err := c.Snapshot(context.Background(), true)
+	still, err := c.Snapshot(context.Background(), true)
 	if err != nil {
 		t.Fatalf("Snapshot with a matching pin: %v", err)
 	}
-	if got := img.Bounds(); got.Dx() != 32 || got.Dy() != 24 {
+	if got := still.Image.Bounds(); got.Dx() != 32 || got.Dy() != 24 {
 		t.Errorf("bounds = %v, want 32x24", got)
+	}
+	// The clean master and the archive are published from Raw, so it has to be
+	// exactly what the camera sent, not a re-encode of it.
+	if !bytes.Equal(still.Raw, body) {
+		t.Errorf("Raw is %d bytes, want the %d the camera sent, byte for byte",
+			len(still.Raw), len(body))
 	}
 }
 
@@ -241,5 +247,46 @@ func TestNewStripsScheme(t *testing.T) {
 		if c.host != "192.168.1.1" {
 			t.Errorf("New(%q).host = %q, want %q", in, c.host, "192.168.1.1")
 		}
+	}
+}
+
+// Raw is only safe to publish unmodified if it is known to be a real image, so
+// a body that decodes must be rejected rather than passed on.
+func TestSnapshotRejectsUndecodableBody(t *testing.T) {
+	host, fp := testServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("this is not a jpeg"))
+	}))
+
+	c, err := New(host, "secret", "cam-1", fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Snapshot(context.Background(), true); err == nil {
+		t.Fatal("a body labelled image/jpeg but undecodable was accepted")
+	}
+}
+
+// Raw and Image must describe the same frame: publishing one while compositing
+// the other would put a different picture in the clean master.
+func TestRawAndImageAgree(t *testing.T) {
+	body := jpegBytes(t)
+	host, fp := testServer(t, snapshotHandler(t, body))
+
+	c, err := New(host, "secret", "cam-1", fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	still, err := c.Snapshot(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := jpeg.Decode(bytes.NewReader(still.Raw))
+	if err != nil {
+		t.Fatalf("Raw does not decode: %v", err)
+	}
+	if decoded.Bounds() != still.Image.Bounds() {
+		t.Errorf("Raw decodes to %v but Image is %v", decoded.Bounds(), still.Image.Bounds())
 	}
 }
