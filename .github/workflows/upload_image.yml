@@ -6,7 +6,7 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write # attaching release assets
   packages: write
 
 jobs:
@@ -43,3 +43,30 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The gateway runs on a host with no container runtime, installed from a
+  # release asset the way the other services on that box are.
+  gateway-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Build the gateway
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath -ldflags="-s -w" \
+            -o rattlecam-gateway-linux-amd64 ./cmd/gateway
+          sha256sum rattlecam-gateway-linux-amd64 > rattlecam-gateway-linux-amd64.sha256
+
+      - name: Attach to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            rattlecam-gateway-linux-amd64 \
+            rattlecam-gateway-linux-amd64.sha256 \
+            --clobber

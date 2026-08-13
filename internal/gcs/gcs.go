@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -90,3 +91,54 @@ func (c *Client) Close() error {
 	}
 	return c.client.Close()
 }
+
+// Object is a fetched object plus the metadata needed to serve it on.
+type Object struct {
+	Data        []byte
+	Generation  int64
+	Updated     time.Time
+	ContentType string
+}
+
+// Generation reports the current generation of an object without fetching it.
+//
+// This is the cheap half of serving: a metadata read costs a fraction of a
+// download, so a gateway can check whether anything changed far more often than
+// it transfers two megabytes.
+func (c *Client) Generation(ctx context.Context, name string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	attrs, err := c.bucket.Object(name).Attrs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("gcs: attrs %s: %w", name, err)
+	}
+	return attrs.Generation, nil
+}
+
+// Get downloads an object.
+func (c *Client) Get(ctx context.Context, name string) (Object, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+
+	r, err := c.bucket.Object(name).NewReader(ctx)
+	if err != nil {
+		return Object{}, fmt.Errorf("gcs: open %s: %w", name, err)
+	}
+	defer r.Close() //nolint:errcheck // read-only
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return Object{}, fmt.Errorf("gcs: read %s: %w", name, err)
+	}
+
+	return Object{
+		Data:        data,
+		Generation:  r.Attrs.Generation,
+		Updated:     r.Attrs.LastModified,
+		ContentType: r.Attrs.ContentType,
+	}, nil
+}
+
+// ErrNotFound reports an object that is not in the bucket.
+func IsNotFound(err error) bool { return errors.Is(err, storage.ErrObjectNotExist) }
