@@ -14,3 +14,8 @@
 
 # Local tooling.
 /node_modules/
+
+# Deployment secrets and per-host config. The examples are tracked; what you
+# fill in is not.
+/deploy/**/.env
+/deploy/**/secrets/
