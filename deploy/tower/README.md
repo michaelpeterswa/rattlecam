@@ -13,8 +13,9 @@ deploy/tower/
 ├── .env                        from .env.example
 ├── theme.json                  copied from the repository root
 ├── assets/
-│   ├── font.ttf
-│   ├── font-bold.ttf
+│   ├── font.ttf                a licence you may redistribute — Inter, Barlow
+│   ├── font-bold.ttf           Condensed and Roboto Condensed are all OFL
+
 │   ├── logo.png
 │   └── annotation.png          optional, must match the camera's aspect ratio
 └── secrets/
@@ -45,6 +46,27 @@ the state where frames publish with no weather on them at all, and checks that
 `p` looks like millibars rather than some other unit.
 
 Neither script prints its credential.
+
+### Dry run
+
+Once `.env` is filled in and the assets are in place, prove the whole thing works
+before anything is published:
+
+```sh
+./dry-run.sh
+```
+
+It runs the real daemon, from the same image production will use, against the
+real camera and weather station — with uploads forced off, so the bucket and
+everything the public reads are untouched. It checks a frame actually comes out,
+that the branded and clean frames differ (so the overlay really drew), and how
+many weather fields reached it.
+
+Then **look at `dry-run-output/latest.jpg`**. Check the pressure against a local
+forecast: if it reads several inches low, `SITE_ELEVATION_M` is wrong, and
+nothing else will tell you.
+
+## Going live
 
 ```sh
 cp .env.example .env      # then fill it in
