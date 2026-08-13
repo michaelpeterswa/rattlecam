@@ -20,7 +20,7 @@ jobs:
           # what makes the release actually reach a published image.
           token: ${{ secrets.GH_RELEASE_PAT }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 

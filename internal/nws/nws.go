@@ -31,8 +31,23 @@ type Client struct {
 	userAgent string
 	http      *http.Client
 
+	// baseURL is empty in production and points at the real service. Tests set
+	// it to a local server; nothing else should.
+	baseURL string
+
 	mu     sync.RWMutex
 	latest *Observation
+}
+
+// defaultBaseURL is where observations actually come from.
+const defaultBaseURL = "https://api.weather.gov"
+
+func (c *Client) endpoint() string {
+	base := c.baseURL
+	if base == "" {
+		base = defaultBaseURL
+	}
+	return fmt.Sprintf("%s/stations/%s/observations/latest", base, c.stationID)
 }
 
 func New(stationID, userAgent string) *Client {
@@ -105,9 +120,7 @@ type apiResponse struct {
 }
 
 func (c *Client) fetch(ctx context.Context) (*Observation, error) {
-	url := fmt.Sprintf("https://api.weather.gov/stations/%s/observations/latest", c.stationID)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("nws: build request: %w", err)
 	}
