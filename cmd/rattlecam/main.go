@@ -16,6 +16,7 @@ import (
 
 	"github.com/michaelpeterswa/rattlecam/internal/config"
 	"github.com/michaelpeterswa/rattlecam/internal/frame"
+	"github.com/michaelpeterswa/rattlecam/internal/gcs"
 	"github.com/michaelpeterswa/rattlecam/internal/metrics"
 	"github.com/michaelpeterswa/rattlecam/internal/nws"
 	"github.com/michaelpeterswa/rattlecam/internal/overlay"
@@ -131,10 +132,28 @@ func run(log *slog.Logger) error {
 	conditions := nws.New(cfg.NWSStationID, cfg.NWSUserAgent)
 
 	pub := &publish.Publisher{
-		OutputDir:     cfg.OutputDir,
-		ArchiveDir:    cfg.ArchiveDir,
-		Quality:       cfg.JPEGQuality,
-		RetentionDays: cfg.RetentionDays,
+		OutputDir:      cfg.OutputDir,
+		ArchiveDir:     cfg.ArchiveDir,
+		Quality:        cfg.JPEGQuality,
+		RetentionDays:  cfg.RetentionDays,
+		ObjectPrefix:   cfg.GCSPrefix,
+		CacheControl:   cfg.GCSCacheControl,
+		ArchiveToStore: cfg.GCSArchive,
+	}
+
+	if cfg.GCSBucket != "" {
+		store, err := gcs.New(ctxBackground(), cfg.GCSBucket)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := store.Close(); err != nil {
+				log.Warn("closing the object store failed", "error", err)
+			}
+		}()
+		pub.Store = store
+		log.Info("publishing to object store",
+			"bucket", store.Bucket(), "prefix", cfg.GCSPrefix, "archive", cfg.GCSArchive)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -292,18 +311,35 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 		return err
 	}
 
-	if err := d.pub.WriteAtomic(d.cfg.OutputDir, "latest.jpg", branded); err != nil {
-		d.metrics.FrameError(ctx, metrics.StagePublish)
-		return err
+	for _, out := range []struct {
+		name string
+		data []byte
+	}{
+		{"latest.jpg", branded},
+		{"latest-clean.jpg", clean},
+	} {
+		// A store failure means the frame reached local disk but not the bucket
+		// viewers read from. That is a stale feed, not a lost frame, so it is
+		// logged and counted rather than aborting the cycle.
+		if err := d.pub.Publish(ctx, out.name, out.data); err != nil {
+			if errors.Is(err, publish.ErrStore) {
+				d.log.Warn("upload failed; serving may be stale", "object", out.name, "error", err)
+				d.metrics.StoreError(ctx)
+				continue
+			}
+			d.metrics.FrameError(ctx, metrics.StagePublish)
+			return err
+		}
 	}
-	if err := d.pub.WriteAtomic(d.cfg.OutputDir, "latest-clean.jpg", clean); err != nil {
-		d.metrics.FrameError(ctx, metrics.StagePublish)
-		return err
-	}
-	if err := d.pub.Archive(now, clean); err != nil {
+
+	if err := d.pub.Archive(ctx, now, clean); err != nil {
 		// Archiving is for timelapses later; failing it must not stop the feed.
 		d.log.Warn("archive failed", "error", err)
-		d.metrics.FrameError(ctx, metrics.StageArchive)
+		if errors.Is(err, publish.ErrStore) {
+			d.metrics.StoreError(ctx)
+		} else {
+			d.metrics.FrameError(ctx, metrics.StageArchive)
+		}
 	}
 
 	// Field count is recorded here rather than derived from the reading: this is

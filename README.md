@@ -183,7 +183,11 @@ advancing.
 | `METRICS_PORT` | `8081` | Serves `/metrics` and `/healthcheck` |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `LOG_FORMAT` | `text` | `text` or `json` |
-| `OUTPUT_DIR` | `/var/www/rattlecam` | |
+| `OUTPUT_DIR` | `/var/www/rattlecam` | Always written; the local copy is the fallback |
+| `GCS_BUCKET` | *(unset)* | Unset disables uploading entirely |
+| `GCS_PREFIX` | *(unset)* | Optional key prefix inside the bucket |
+| `GCS_ARCHIVE` | `true` | Upload dated masters under `archive/` |
+| `GCS_CACHE_CONTROL` | `no-cache, max-age=0, must-revalidate` | Applied to the `latest-*` objects |
 | `ARCHIVE_DIR` | *(unset)* | Unset disables archiving |
 | `RETENTION_DAYS` | `0` | `0` keeps archives forever |
 | `JPEG_QUALITY` | `92` | |
@@ -288,6 +292,33 @@ on a metric that was never emitted.
 Pair it with `rattlecam_frame_fields`: age climbing with fields at zero is the
 staleness gate working correctly, and age climbing with fields non-zero would
 mean it is not.
+
+## Publishing to object storage
+
+The camera sits on a radio tower with a finite uplink, and how many people are
+watching should not be the tower's problem. With `GCS_BUCKET` set, each frame is
+pushed once to the bucket and readers pull from there, so upstream cost is one
+upload per frame regardless of audience. It also means the tunnel or the
+on-premise host going away leaves the last uploaded frame still serving.
+
+Local writes continue either way. A failed upload is reported as an error
+wrapping `publish.ErrStore`, which the daemon logs and counts on
+`rattlecam_store_errors_total` before carrying on — the frame is on disk, and a
+stale feed beats treating the whole cycle as lost.
+
+Two details that are easy to get wrong:
+
+- **`Cache-Control` is set on the object at upload**, not by a proxy. A bucket's
+  default is `public, max-age=3600`, so a stable `latest.jpg` URL would serve an
+  hour-old frame long after a newer one landed. Archived frames are written once
+  under a timestamped name and never change, so those go the other way and cache
+  for a year.
+- **Uploading needs `storage.objects.delete` as well as `create`.** Replacing an
+  object requires both, and `latest.jpg` is replaced every minute, so
+  `roles/storage.objectCreator` alone fails on every write.
+
+Authentication is Application Default Credentials: the metadata server on GCP,
+or `GOOGLE_APPLICATION_CREDENTIALS` pointing at a key file on an on-premise host.
 
 ## Serving
 

@@ -210,7 +210,7 @@ func TestArchivePath(t *testing.T) {
 
 func TestArchiveIsNoOpWithoutArchiveDir(t *testing.T) {
 	p := &Publisher{OutputDir: t.TempDir(), Quality: 92}
-	if err := p.Archive(time.Now(), []byte("x")); err != nil {
+	if err := p.Archive(context.Background(), time.Now(), []byte("x")); err != nil {
 		t.Errorf("Archive with no ArchiveDir: %v", err)
 	}
 }
@@ -220,7 +220,7 @@ func TestArchiveWritesDatedPath(t *testing.T) {
 	p := &Publisher{ArchiveDir: root, Quality: 92}
 
 	ts := time.Date(2026, 3, 9, 7, 5, 4, 0, time.UTC)
-	if err := p.Archive(ts, []byte("master")); err != nil {
+	if err := p.Archive(context.Background(), ts, []byte("master")); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
 
@@ -241,7 +241,7 @@ func TestPrune(t *testing.T) {
 	keep := now.AddDate(0, 0, -2)
 	drop := now.AddDate(0, 0, -30)
 	for _, ts := range []time.Time{keep, drop} {
-		if err := p.Archive(ts, []byte("x")); err != nil {
+		if err := p.Archive(context.Background(), ts, []byte("x")); err != nil {
 			t.Fatalf("seed archive: %v", err)
 		}
 	}
@@ -266,7 +266,7 @@ func TestPruneUnlimitedRetentionKeepsEverything(t *testing.T) {
 	p := &Publisher{ArchiveDir: root, Quality: 92, RetentionDays: 0}
 
 	old := now.AddDate(-3, 0, 0)
-	if err := p.Archive(old, []byte("x")); err != nil {
+	if err := p.Archive(context.Background(), old, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	if err := p.Prune(now); err != nil {
