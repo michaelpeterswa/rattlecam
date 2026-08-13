@@ -84,6 +84,10 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
+	for _, w := range cfg.Warnings {
+		log.Warn(w)
+	}
+
 	m, shutdownTelemetry, err := startTelemetry(ctxBackground(), cfg, log)
 	if err != nil {
 		return err

@@ -189,7 +189,7 @@ advancing.
 | `JPEG_QUALITY` | `92` | |
 | `POLL_INTERVAL` | `15s` | How often Influx is asked for a newer observation |
 | `MIN_FRAME_GAP` | `55s` | Floor between frames |
-| `MAX_FRAME_AGE` | `3m` | Render anyway after this long |
+| `MAX_FRAME_AGE` | `3m` | Render anyway after this long. Checked once per poll, so a value below `POLL_INTERVAL` cannot fire and is clamped to it with a warning. |
 | `STALE_AFTER` | `10m` | Also the Flux `range()` window |
 
 ## Notes on the data

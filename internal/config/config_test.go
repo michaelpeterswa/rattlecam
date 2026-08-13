@@ -151,6 +151,69 @@ func TestValidValuesAccepted(t *testing.T) {
 	}
 }
 
+// MAX_FRAME_AGE is checked once per poll, so a value below POLL_INTERVAL is a
+// ceiling that cannot fire. Clamping makes the config honest about what will
+// actually happen.
+func TestMaxFrameAgeClampsToPollInterval(t *testing.T) {
+	setRequired(t)
+	t.Setenv("POLL_INTERVAL", "15m")
+	t.Setenv("MAX_FRAME_AGE", "3m")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.MaxFrameAge != 15*time.Minute {
+		t.Errorf("MaxFrameAge = %s, want it clamped to 15m", c.MaxFrameAge)
+	}
+	if len(c.Warnings) != 1 {
+		t.Fatalf("got %d warnings, want 1: %v", len(c.Warnings), c.Warnings)
+	}
+	for _, want := range []string{"MAX_FRAME_AGE", "POLL_INTERVAL", "3m", "15m"} {
+		if !strings.Contains(c.Warnings[0], want) {
+			t.Errorf("warning omits %q: %s", want, c.Warnings[0])
+		}
+	}
+}
+
+func TestMaxFrameAgeLeftAloneWhenItCanFire(t *testing.T) {
+	for _, tc := range []struct{ poll, maxAge string }{
+		{"15s", "3m"},  // the defaults: the ceiling is well above the poll
+		{"30s", "30s"}, // equal is fine; the check is >=
+	} {
+		t.Run(tc.poll+"/"+tc.maxAge, func(t *testing.T) {
+			setRequired(t)
+			t.Setenv("POLL_INTERVAL", tc.poll)
+			t.Setenv("MAX_FRAME_AGE", tc.maxAge)
+
+			c, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			want, _ := time.ParseDuration(tc.maxAge)
+			if c.MaxFrameAge != want {
+				t.Errorf("MaxFrameAge = %s, want %s unchanged", c.MaxFrameAge, want)
+			}
+			if len(c.Warnings) != 0 {
+				t.Errorf("unexpected warnings: %v", c.Warnings)
+			}
+		})
+	}
+}
+
+// The defaults must not warn, or every startup would carry noise.
+func TestDefaultsProduceNoWarnings(t *testing.T) {
+	setRequired(t)
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(c.Warnings) != 0 {
+		t.Errorf("defaults warned: %v", c.Warnings)
+	}
+}
+
 func TestMetricsSettings(t *testing.T) {
 	setRequired(t)
 
