@@ -31,6 +31,22 @@ type Publisher struct {
 	ObjectPrefix   string // optional key prefix inside the bucket
 	CacheControl   string // applied to the latest-* objects
 	ArchiveToStore bool
+
+	// Queue, when set, receives frames instead of Store doing so inline.
+	//
+	// That keeps the upload off the render path: a slow or dead link delays
+	// nothing, because handing a frame to the queue is a local disk write. A
+	// separate drainer moves it on when the network allows.
+	Queue Enqueuer
+}
+
+// Enqueuer is the durable hand-off between rendering and uploading.
+type Enqueuer interface {
+	// AddLatest queues a frame that supersedes any pending one of the same
+	// name.
+	AddLatest(object string, data []byte) error
+	// AddArchive queues a frame that must not be superseded.
+	AddArchive(object string, data []byte) error
 }
 
 // defaultCacheControl keeps a stable URL from serving a stale frame. A bucket's
@@ -65,6 +81,9 @@ func (p *Publisher) object(name string) string {
 func (p *Publisher) Publish(ctx context.Context, name string, data []byte) error {
 	if err := p.WriteAtomic(p.OutputDir, name, data); err != nil {
 		return err
+	}
+	if p.Queue != nil {
+		return storeErr("queue "+name, p.Queue.AddLatest(p.object(name), data))
 	}
 	if p.Store == nil {
 		return nil
@@ -173,11 +192,15 @@ func (p *Publisher) Archive(ctx context.Context, t time.Time, data []byte) error
 		}
 	}
 
-	if p.Store == nil || !p.ArchiveToStore {
+	if !p.ArchiveToStore || (p.Store == nil && p.Queue == nil) {
 		return nil
 	}
 
 	key := p.object(path.Join("archive", filepath.ToSlash(sub), name))
+
+	if p.Queue != nil {
+		return storeErr("queue "+key, p.Queue.AddArchive(key, data))
+	}
 	// An archived frame is written once under a timestamped name and never
 	// changes, so unlike latest.jpg it can be cached indefinitely.
 	return storeErr("put "+key, p.Store.Put(ctx, key, data, PutOptions{

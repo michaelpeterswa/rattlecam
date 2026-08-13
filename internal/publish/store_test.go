@@ -203,3 +203,76 @@ func TestArchiveLocalAndStoreAreIndependent(t *testing.T) {
 		t.Errorf("remote archive missing: %v", store.names())
 	}
 }
+
+// fakeQueue records what was handed to the durable queue.
+type fakeQueue struct {
+	latest  []string
+	archive []string
+	fail    error
+}
+
+func (q *fakeQueue) AddLatest(object string, _ []byte) error {
+	if q.fail != nil {
+		return q.fail
+	}
+	q.latest = append(q.latest, object)
+	return nil
+}
+
+func (q *fakeQueue) AddArchive(object string, _ []byte) error {
+	if q.fail != nil {
+		return q.fail
+	}
+	q.archive = append(q.archive, object)
+	return nil
+}
+
+// With a queue configured the upload must not happen inline: rendering cannot
+// be allowed to wait on a mountain-top network link.
+func TestPublishPrefersTheQueueOverInlineUpload(t *testing.T) {
+	store := newFakeStore()
+	queue := &fakeQueue{}
+	p := &Publisher{OutputDir: t.TempDir(), Quality: 92, Store: store, Queue: queue}
+
+	if err := p.Publish(context.Background(), "latest.jpg", []byte("frame")); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(queue.latest) != 1 || queue.latest[0] != "latest.jpg" {
+		t.Errorf("queued %v, want latest.jpg", queue.latest)
+	}
+	if n := len(store.names()); n != 0 {
+		t.Errorf("uploaded inline despite a queue: %v", store.names())
+	}
+}
+
+func TestArchivePrefersTheQueue(t *testing.T) {
+	store := newFakeStore()
+	queue := &fakeQueue{}
+	p := &Publisher{Quality: 92, Store: store, Queue: queue, ArchiveToStore: true}
+
+	ts := time.Date(2026, 3, 9, 7, 5, 4, 0, time.UTC)
+	if err := p.Archive(context.Background(), ts, []byte("master")); err != nil {
+		t.Fatal(err)
+	}
+	if want := "archive/2026/03/09/070504.jpg"; len(queue.archive) != 1 || queue.archive[0] != want {
+		t.Errorf("queued %v, want %s", queue.archive, want)
+	}
+	if n := len(store.names()); n != 0 {
+		t.Errorf("uploaded inline despite a queue: %v", store.names())
+	}
+}
+
+// A queue that cannot accept the frame is still a store-side problem: the frame
+// is on local disk, so the daemon carries on rather than losing the cycle.
+func TestQueueFailureIsAStoreError(t *testing.T) {
+	queue := &fakeQueue{fail: errors.New("disk full")}
+	p := &Publisher{OutputDir: t.TempDir(), Quality: 92, Queue: queue}
+
+	err := p.Publish(context.Background(), "latest.jpg", []byte("x"))
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if !errors.Is(err, ErrStore) {
+		t.Errorf("error %v does not wrap ErrStore", err)
+	}
+}

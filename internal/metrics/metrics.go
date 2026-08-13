@@ -39,6 +39,8 @@ type Metrics struct {
 	influxErrors    metric.Int64Counter
 	nwsErrors       metric.Int64Counter
 	storeErrors     metric.Int64Counter
+	spoolEntries    metric.Int64Gauge
+	spoolBytes      metric.Int64Gauge
 
 	// Unix nanoseconds, zero meaning "has not happened yet". Read from the
 	// collection callback on another goroutine, hence atomic.
@@ -123,6 +125,20 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Failed conditions refreshes."),
 	); err != nil {
 		return nil, fmt.Errorf("metrics: nws.errors: %w", err)
+	}
+
+	if m.spoolEntries, err = meter.Int64Gauge(
+		"rattlecam.spool.entries",
+		metric.WithDescription("Frames waiting to reach the object store. Rises while the link is down."),
+	); err != nil {
+		return nil, fmt.Errorf("metrics: spool.entries: %w", err)
+	}
+
+	if m.spoolBytes, err = meter.Int64Gauge(
+		"rattlecam.spool.bytes",
+		metric.WithDescription("Bytes held on disk waiting to upload; approaches SPOOL_MAX_BYTES before eviction starts."),
+	); err != nil {
+		return nil, fmt.Errorf("metrics: spool.bytes: %w", err)
 	}
 
 	// These two are deliberately observable rather than set at publish time.
@@ -219,6 +235,14 @@ func (m *Metrics) InfluxQuery(ctx context.Context, d time.Duration, kind string)
 // frame did land locally: the feed goes stale rather than missing.
 func (m *Metrics) StoreError(ctx context.Context) {
 	m.storeErrors.Add(ctx, 1)
+}
+
+// Spool records the current upload backlog. A depth that climbs and never
+// falls means the link is down; one that never empties means it is too slow to
+// keep up, which is a different problem with the same symptom.
+func (m *Metrics) Spool(ctx context.Context, entries int, bytes int64) {
+	m.spoolEntries.Record(ctx, int64(entries))
+	m.spoolBytes.Record(ctx, bytes)
 }
 
 // NWSError records a failed conditions refresh.

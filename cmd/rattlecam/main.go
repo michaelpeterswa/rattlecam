@@ -22,6 +22,7 @@ import (
 	"github.com/michaelpeterswa/rattlecam/internal/overlay"
 	"github.com/michaelpeterswa/rattlecam/internal/protect"
 	"github.com/michaelpeterswa/rattlecam/internal/publish"
+	"github.com/michaelpeterswa/rattlecam/internal/spool"
 	"github.com/michaelpeterswa/rattlecam/internal/wx"
 )
 
@@ -141,6 +142,8 @@ func run(log *slog.Logger) error {
 		ArchiveToStore: cfg.GCSArchive,
 	}
 
+	var drainer *uploader
+
 	if cfg.GCSBucket != "" {
 		store, err := gcs.New(ctxBackground(), cfg.GCSBucket)
 		if err != nil {
@@ -152,6 +155,21 @@ func run(log *slog.Logger) error {
 			}
 		}()
 		pub.Store = store
+
+		if cfg.SpoolDir != "" {
+			q, err := spool.Open(cfg.SpoolDir, int64(cfg.SpoolMaxBytes))
+			if err != nil {
+				return err
+			}
+			pub.Queue = q
+			drainer = &uploader{
+				spool: q, store: store, log: log, metrics: m,
+				cacheControl: cfg.GCSCacheControl,
+				wake:         make(chan struct{}, 1),
+			}
+			log.Info("queueing uploads", "spool", cfg.SpoolDir, "max_bytes", cfg.SpoolMaxBytes)
+		}
+
 		log.Info("publishing to object store",
 			"bucket", store.Bucket(), "prefix", cfg.GCSPrefix, "archive", cfg.GCSArchive)
 	}
@@ -184,6 +202,9 @@ func run(log *slog.Logger) error {
 		m.NWSError(ctx)
 	})
 	go prune(ctx, pub, log)
+	if drainer != nil {
+		go drainer.run(ctx)
+	}
 
 	log.Info("rattlecam started", "poll", cfg.PollInterval, "output", cfg.OutputDir)
 
@@ -192,6 +213,7 @@ func run(log *slog.Logger) error {
 		cam: cam, source: source, conditions: conditions,
 		renderer: renderer, pub: pub,
 		metrics: m,
+		drainer: drainer,
 		params:  params,
 	}
 	d.loop(ctx)
@@ -208,6 +230,7 @@ type daemon struct {
 	renderer   *overlay.Renderer
 	pub        *publish.Publisher
 	metrics    *metrics.Metrics
+	drainer    *uploader
 
 	lastObserved time.Time // observation time of the last reading we rendered
 	lastRender   time.Time
@@ -344,6 +367,10 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 
 	// Field count is recorded here rather than derived from the reading: this is
 	// what actually reached the frame, after the staleness gate had its say.
+	// The frame is queued locally; wake the drainer so the normal case uploads
+	// immediately rather than waiting for the next sweep.
+	d.drainer.nudge()
+
 	d.metrics.Published(ctx, len(f.Fields))
 	d.log.Info("published", "fields", len(f.Fields), "conditions", f.Conditions)
 	return nil
@@ -442,6 +469,98 @@ func loadAnnotation(r *overlay.Renderer, path string, log *slog.Logger) error {
 		return nil
 	}
 	return err
+}
+
+// uploader moves spooled frames to the object store.
+//
+// It runs apart from the render loop on purpose. Rendering must not wait on a
+// mountain-top network link: a frame is finished the moment it reaches local
+// disk, and getting it to the bucket is a separate concern that is allowed to
+// be slow, fail, and catch up later.
+type uploader struct {
+	spool        *spool.Spool
+	store        publish.ObjectStore
+	log          *slog.Logger
+	metrics      *metrics.Metrics
+	cacheControl string
+	wake         chan struct{}
+}
+
+// nudge asks for a drain without blocking. A full channel already means one is
+// pending, so dropping the signal loses nothing.
+func (u *uploader) nudge() {
+	if u == nil {
+		return
+	}
+	select {
+	case u.wake <- struct{}{}:
+	default:
+	}
+}
+
+func (u *uploader) run(ctx context.Context) {
+	// The sweep is the safety net for a drain that failed with nothing new
+	// arriving to nudge it.
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+
+	for {
+		u.drain(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-u.wake:
+		case <-t.C:
+		}
+	}
+}
+
+func (u *uploader) drain(ctx context.Context) {
+	entries, err := u.spool.Pending()
+	if err != nil {
+		u.log.Warn("reading the upload queue failed", "error", err)
+		return
+	}
+
+	var sent int
+	for _, e := range entries {
+		if ctx.Err() != nil {
+			return
+		}
+
+		data, err := e.Read()
+		if err != nil {
+			// The entry is unreadable, so it will never upload. Drop it rather
+			// than blocking everything behind it forever.
+			u.log.Warn("discarding an unreadable queued frame", "object", e.Object, "error", err)
+			_ = u.spool.Done(e)
+			continue
+		}
+
+		opts := publish.PutOptions{ContentType: "image/jpeg", CacheControl: u.cacheControl}
+		if e.Kind == spool.Archive {
+			opts.CacheControl = "public, max-age=31536000, immutable"
+		}
+
+		if err := u.store.Put(ctx, e.Object, data, opts); err != nil {
+			// Almost certainly the link. Stop here and keep the order rather
+			// than hammering the rest of the backlog against a dead network.
+			u.log.Warn("upload failed; frames remain queued", "object", e.Object, "error", err)
+			u.metrics.StoreError(ctx)
+			break
+		}
+		if err := u.spool.Done(e); err != nil {
+			u.log.Warn("removing an uploaded frame from the queue failed", "error", err)
+		}
+		sent++
+	}
+
+	if st, err := u.spool.Stats(); err == nil {
+		u.metrics.Spool(ctx, st.Entries, st.Bytes)
+		if sent > 0 && st.Entries > 0 {
+			u.log.Info("working through the upload backlog", "sent", sent, "remaining", st.Entries)
+		}
+	}
 }
 
 func prune(ctx context.Context, pub *publish.Publisher, log *slog.Logger) {
