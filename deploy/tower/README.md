@@ -71,7 +71,12 @@ nothing else will tell you.
 
 ```sh
 cp .env.example .env      # then fill it in
-chmod 600 .env secrets/gcp-credentials.json
+chmod 600 .env
+
+# The container runs as uid 65532, so the credential has to be readable by that
+# user rather than by the account that created it.
+sudo chown 65532:65532 secrets/gcp-credentials.json
+sudo chmod 400 secrets/gcp-credentials.json
 docker compose up -d
 docker compose logs -f
 ```

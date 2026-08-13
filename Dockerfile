@@ -13,11 +13,16 @@ COPY . .
 
 # CGO off so the result is a static binary the distroless image can run, and
 # -trimpath so the build is reproducible regardless of where it happened.
+# The seed directories exist to give the runtime volumes an owner. Docker copies
+# whatever ownership a path has in the image into a fresh named volume; if the
+# path is absent it creates one owned by root, which a container running as a
+# non-root user cannot write to.
 RUN CGO_ENABLED=0 GOOS=linux go build \
     -trimpath \
     -ldflags="-s -w" \
     -o /out/rattlecam \
-    ./cmd/rattlecam
+    ./cmd/rattlecam \
+    && mkdir -p /seed/output /seed/spool
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
@@ -38,6 +43,11 @@ COPY --from=build /out/rattlecam /usr/local/bin/rattlecam
 # A build from a working tree that has them produces a self-contained image.
 COPY assets/ /app/assets/
 COPY theme.json /app/theme.json
+
+# The frame and the upload queue are written at runtime, so these have to be
+# owned by the user the process runs as before a volume is mounted over them.
+COPY --from=build --chown=65532:65532 /seed/output /output
+COPY --from=build --chown=65532:65532 /seed/spool /spool
 
 # 65532 is distroless's "nonroot". Numeric rather than named so the host can
 # resolve it — a name means nothing outside the image, and an orchestrator
