@@ -1,0 +1,72 @@
+---
+# rattlecam at the tower site.
+#
+# This is the deployment manifest for the box on the mountain — the one that can
+# actually reach the camera and the weather station. It differs from the compose
+# file at the repository root, which builds from source and brings up a Grafana
+# stack for local work; here the image is pulled and pinned, and nothing is built.
+#
+# Copy this directory to the host, fill in .env, and:
+#
+#   docker compose up -d
+#
+services:
+  rattlecam:
+    # Pinned deliberately. The link to this site is slow and occasionally down,
+    # so a deploy should be a decision rather than something that happens on its
+    # own the next time the container restarts.
+    image: ghcr.io/michaelpeterswa/rattlecam:${RATTLECAM_VERSION:?set RATTLECAM_VERSION, e.g. 1.1.0}
+    container_name: rattlecam
+    restart: unless-stopped
+
+    env_file: .env
+
+    environment:
+      # Everything the frame is written against lives on the local network, so
+      # the container needs to reach the LAN rather than only the internet.
+      THEME_PATH: /app/theme.json
+      OUTPUT_DIR: /output
+      SPOOL_DIR: /spool
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/gcp-credentials.json
+
+    volumes:
+      # Branding and layout, read at runtime so they can change without pulling
+      # a new image.
+      - ./assets:/app/assets:ro
+      - ./theme.json:/app/theme.json:ro
+
+      # The upload queue. This has to be a named volume rather than a bind or a
+      # container path: it is what carries frames across a network outage, and
+      # losing it on a restart would defeat the point of having it.
+      - spool:/spool
+
+      # Local copies. Not what the public reads — that comes from the bucket —
+      # but useful for looking at the most recent frame on the box itself.
+      - output:/output
+
+      # Upload credentials: create and replace objects in one bucket, nothing
+      # else. See terraform/rattlecam.tf.
+      - ./secrets/gcp-credentials.json:/secrets/gcp-credentials.json:ro
+
+    ports:
+      # /metrics and /healthz. Bound to loopback because there is no reason for
+      # anything off this host to reach it; point a local collector at it, or
+      # publish it over the tunnel deliberately.
+      - "127.0.0.1:${METRICS_PORT:-8081}:${METRICS_PORT:-8081}"
+
+    # A 4K frame is decoded, composited and re-encoded once a minute, which is
+    # the memory high-water mark. The cap turns a leak into a restart rather
+    # than into a box that has to be visited.
+    mem_limit: 512m
+
+    # Log rotation matters more here than usual: this host is up a mountain, and
+    # a disk filled with logs is a site visit.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  spool:
+  output:
