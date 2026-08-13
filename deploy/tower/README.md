@@ -25,6 +25,17 @@ Assets are gitignored, so they are copied to the host rather than pulled. The
 daemon refuses to start without the fonts, which is deliberate: a missing font is
 a startup failure, not a degraded frame.
 
+Before filling in `.env`, check the console from a host that can reach it:
+
+```sh
+PROTECT_HOST=10.1.0.1 PROTECT_API_KEY=… PROTECT_CAMERA_ID=… ./verify-protect.sh
+```
+
+It confirms the address is routable, the key is accepted, the camera id exists,
+and that the snapshot really is a decodable JPEG rather than a 200 carrying an
+error page. It prints the certificate fingerprint to paste into
+`PROTECT_CERT_SHA256`, and never echoes the key.
+
 ```sh
 cp .env.example .env      # then fill it in
 chmod 600 .env secrets/gcp-credentials.json
