@@ -28,13 +28,23 @@ a startup failure, not a degraded frame.
 Before filling in `.env`, check the console from a host that can reach it:
 
 ```sh
-PROTECT_HOST=10.1.0.1 PROTECT_API_KEY=… PROTECT_CAMERA_ID=… ./verify-protect.sh
+PROTECT_HOST=… PROTECT_API_KEY=… PROTECT_CAMERA_ID=… ./verify-protect.sh
+INFLUX_URL=…    INFLUX_TOKEN=…    INFLUX_ORG=…       ./verify-influx.sh
 ```
 
-It confirms the address is routable, the key is accepted, the camera id exists,
-and that the snapshot really is a decodable JPEG rather than a 200 carrying an
-error page. It prints the certificate fingerprint to paste into
-`PROTECT_CERT_SHA256`, and never echoes the key.
+`verify-protect.sh` confirms the address is routable, the key is accepted, the
+camera id exists, and that the snapshot really is a decodable JPEG rather than a
+200 carrying an error page. It prints the certificate fingerprint for
+`PROTECT_CERT_SHA256`.
+
+`verify-influx.sh` runs the exact query the daemon runs — same field allowlist,
+same window — and reports what came back. Flux returns a bad query as a **200
+with an error table** rather than a non-200, so a status code alone does not tell
+you it worked. It also flags an observation older than `STALE_AFTER`, which is
+the state where frames publish with no weather on them at all, and checks that
+`p` looks like millibars rather than some other unit.
+
+Neither script prints its credential.
 
 ```sh
 cp .env.example .env      # then fill it in
