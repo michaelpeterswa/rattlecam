@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"alpineworks.io/ootel"
+	hostmetrics "go.opentelemetry.io/contrib/instrumentation/host"
+	runtimemetrics "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 
 	"github.com/michaelpeterswa/rattlecam/internal/config"
@@ -61,7 +63,17 @@ func main() {
 // reported through it.
 //
 //	LOG_LEVEL   debug | info | warn | error   (default info)
-//	LOG_FORMAT  text | json                   (default text)
+//
+// Output is JSON on stdout, with no option for anything else. A log line here
+// carries structured fields worth querying — the luma behind a night transition,
+// the age of the observation on a frame — and a format that is only sometimes
+// parseable is one no collector can be pointed at with confidence. Stdout rather
+// than stderr because these are the process's ordinary output, not a side
+// channel, and every log collector reads it by default.
+//
+// It also installs itself as slog's default, so anything reaching for the
+// package-level functions lands in the same stream rather than the unconfigured
+// text logger.
 func newLogger() (*slog.Logger, error) {
 	level := slog.LevelInfo
 	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {
@@ -70,16 +82,9 @@ func newLogger() (*slog.Logger, error) {
 		}
 	}
 
-	opts := &slog.HandlerOptions{Level: level}
-
-	switch format := strings.ToLower(strings.TrimSpace(os.Getenv("LOG_FORMAT"))); format {
-	case "", "text":
-		return slog.New(slog.NewTextHandler(os.Stderr, opts)), nil
-	case "json":
-		return slog.New(slog.NewJSONHandler(os.Stderr, opts)), nil
-	default:
-		return nil, fmt.Errorf("LOG_FORMAT: %q is not a format (want text or json)", format)
-	}
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(log)
+	return log, nil
 }
 
 func run(log *slog.Logger) error {
@@ -497,6 +502,20 @@ func startTelemetry(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 	shutdown, err := client.Init(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("telemetry: %w", err)
+	}
+
+	// Go runtime and host metrics, on the meter ootel just installed.
+	//
+	// This daemon holds whole 4K frames in memory and resamples a 33 MB layer on
+	// every theme or day/night change, so heap and GC behaviour are worth seeing
+	// directly rather than inferring from a container that occasionally restarts.
+	// Neither is fatal if it fails: losing runtime metrics is not a reason to
+	// stop publishing pictures.
+	if err := runtimemetrics.Start(runtimemetrics.WithMinimumReadMemStatsInterval(5 * time.Second)); err != nil {
+		log.Warn("runtime metrics unavailable", "error", err)
+	}
+	if err := hostmetrics.Start(); err != nil {
+		log.Warn("host metrics unavailable", "error", err)
 	}
 
 	// Instruments must be created from the provider ootel installed, not from

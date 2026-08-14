@@ -160,8 +160,13 @@ entirely, which is the one thing that must never happen unattended.
 
 Failures are logged, including fatal ones — a bad environment comes out as a
 structured list of problems rather than a sentence with separators buried in it.
-The single exception is a failure to build the logger itself (`LOG_LEVEL`,
-`LOG_FORMAT`), which cannot be logged and so goes straight to stderr.
+The single exception is a failure to build the logger itself (`LOG_LEVEL`), which
+cannot be logged and so goes straight to stderr.
+
+Logs are JSON on stdout, with no setting that makes them anything else. The lines
+carry fields worth querying — the luma behind a night transition, the age of the
+observation on a frame — and a format that is only sometimes parseable is one no
+collector can be pointed at with confidence.
 
 The daemon then renders one real frame before entering its loop. Fonts, the
 crest, the annotation's aspect and every placement value in the theme are only
@@ -190,7 +195,6 @@ advancing.
 | `METRICS_EXPORTER` | `prometheus` | `prometheus`, `otlpgrpc` or `otlphttp` |
 | `METRICS_PORT` | `8081` | Serves `/metrics` and `/healthcheck` |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
-| `LOG_FORMAT` | `text` | `text` or `json` |
 | `OUTPUT_DIR` | `/var/www/rattlecam` | Always written; the local copy is the fallback |
 | `GCS_BUCKET` | *(unset)* | Unset disables uploading entirely |
 | `GCS_PREFIX` | *(unset)* | Optional key prefix inside the bucket |
