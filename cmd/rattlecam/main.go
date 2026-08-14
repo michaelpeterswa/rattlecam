@@ -368,13 +368,22 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 
 	// Measured off the frame we are about to publish, so the treatment always
 	// matches the picture it is drawn on rather than trailing it by one cycle.
-	luma := light.MeanLuma(still.Image)
-	night, changed := d.night.Observe(luma)
-	d.metrics.Night(ctx, night, luma)
+	reading := light.Measure(still.Image)
+	night, changed := d.night.Observe(reading)
+	d.metrics.Night(ctx, night, reading.Luma)
 	if changed {
-		d.log.Info("light level crossed the night threshold",
-			"night", night, "luma", math.Round(luma*10)/10,
-			"enter_below", d.cfg.NightEnter, "exit_above", d.cfg.NightExit)
+		// The signal is named because the two behave differently: mono is the
+		// camera's own IR switch and flips once, where luma is a slope. Knowing
+		// which one decided is the difference between reading a threshold
+		// problem and reading a camera problem.
+		signal := "luma"
+		if reading.MonoKnown {
+			signal = "mono"
+		}
+		d.log.Info("night state changed",
+			"night", night, "by", signal,
+			"luma", math.Round(reading.Luma*10)/10,
+			"mono", reading.Mono)
 	}
 
 	// The annotation is black ink and vanishes against a night sky, so after
