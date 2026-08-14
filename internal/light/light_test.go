@@ -21,6 +21,13 @@ func solid(w, h int, c color.Color) *image.RGBA {
 	return img
 }
 
+// lumaOnly is a reading from a frame whose colour model said nothing, which is
+// the only case where the luma band decides. The Detector tests below are all
+// about that fallback; the mono path has its own.
+func lumaOnly(luma float64) Reading {
+	return Reading{Luma: luma, MonoKnown: false}
+}
+
 func closeTo(t *testing.T, got, want, tol float64, what string) {
 	t.Helper()
 	if math.Abs(got-want) > tol {
@@ -118,18 +125,18 @@ func TestMeanLumaOfNothing(t *testing.T) {
 }
 
 func TestDetectorEntersAndLeavesNight(t *testing.T) {
-	d := &Detector{Enter: 35, Exit: 55}
+	d := &Detector{Enter: 50, Exit: 75}
 
-	if night, changed := d.Observe(120); night || !changed {
+	if night, changed := d.Observe(lumaOnly(120)); night || !changed {
 		t.Errorf("first daylight observation: night=%v changed=%v, want false/true", night, changed)
 	}
-	if night, changed := d.Observe(110); night || changed {
+	if night, changed := d.Observe(lumaOnly(110)); night || changed {
 		t.Errorf("steady daylight: night=%v changed=%v, want false/false", night, changed)
 	}
-	if night, changed := d.Observe(10); !night || !changed {
+	if night, changed := d.Observe(lumaOnly(10)); !night || !changed {
 		t.Errorf("dark frame: night=%v changed=%v, want true/true", night, changed)
 	}
-	if night, changed := d.Observe(120); night || !changed {
+	if night, changed := d.Observe(lumaOnly(120)); night || !changed {
 		t.Errorf("back to daylight: night=%v changed=%v, want false/true", night, changed)
 	}
 }
@@ -137,18 +144,18 @@ func TestDetectorEntersAndLeavesNight(t *testing.T) {
 // The reason the band exists. Dusk drifts the measurement through the middle of
 // the range; if that flipped the state, the treatment would flicker every poll.
 func TestDetectorDoesNotFlapInsideTheBand(t *testing.T) {
-	d := &Detector{Enter: 35, Exit: 55}
-	d.Observe(120) // establish day
+	d := &Detector{Enter: 50, Exit: 75}
+	d.Observe(lumaOnly(120)) // establish day
 
-	for _, luma := range []float64{54, 40, 36, 45, 54, 36, 50} {
-		if night, changed := d.Observe(luma); night || changed {
+	for _, luma := range []float64{74, 60, 51, 65, 74, 51, 70} {
+		if night, changed := d.Observe(lumaOnly(luma)); night || changed {
 			t.Fatalf("luma %.0f inside the band flipped the state (night=%v changed=%v)", luma, night, changed)
 		}
 	}
 
-	d.Observe(10) // now night
-	for _, luma := range []float64{36, 50, 54, 40, 54} {
-		if night, changed := d.Observe(luma); !night || changed {
+	d.Observe(lumaOnly(10)) // now night
+	for _, luma := range []float64{51, 70, 74, 60, 74} {
+		if night, changed := d.Observe(lumaOnly(luma)); !night || changed {
 			t.Fatalf("luma %.0f inside the band left night (night=%v changed=%v)", luma, night, changed)
 		}
 	}
@@ -157,8 +164,8 @@ func TestDetectorDoesNotFlapInsideTheBand(t *testing.T) {
 // Starting up after dark must report night immediately, not wait for a
 // transition that already happened hours ago.
 func TestDetectorStartingIntoTheNight(t *testing.T) {
-	d := &Detector{Enter: 35, Exit: 55}
-	if night, changed := d.Observe(10); !night || !changed {
+	d := &Detector{Enter: 50, Exit: 75}
+	if night, changed := d.Observe(lumaOnly(10)); !night || !changed {
 		t.Errorf("night=%v changed=%v, want true/true", night, changed)
 	}
 	if d.Night() != true {
@@ -167,19 +174,19 @@ func TestDetectorStartingIntoTheNight(t *testing.T) {
 }
 
 func TestDetectorThresholdsAreInclusive(t *testing.T) {
-	d := &Detector{Enter: 35, Exit: 55}
-	d.Observe(120)
-	if night, _ := d.Observe(35); !night {
+	d := &Detector{Enter: 50, Exit: 75}
+	d.Observe(lumaOnly(120))
+	if night, _ := d.Observe(lumaOnly(50)); !night {
 		t.Error("luma exactly at Enter did not begin night")
 	}
-	if night, _ := d.Observe(55); night {
+	if night, _ := d.Observe(lumaOnly(75)); night {
 		t.Error("luma exactly at Exit did not end night")
 	}
 }
 
 func TestNilDetector(t *testing.T) {
 	var d *Detector
-	if night, changed := d.Observe(0); night || changed {
+	if night, changed := d.Observe(Reading{}); night || changed {
 		t.Errorf("nil Detector: night=%v changed=%v, want false/false", night, changed)
 	}
 	if d.Night() {
@@ -187,98 +194,120 @@ func TestNilDetector(t *testing.T) {
 	}
 }
 
-// The thresholds are only defensible if real frames actually sit either side of
-// them, so this measures real frames from the camera the daemon runs on.
-//
-// The fixtures are 320x180 JPEGs downscaled from the 4K originals, which the
-// repo does not carry. Mean luma survives downscaling — each fixture measures
-// within 0.9 of its original — and JPEG keeps them on the YCbCr path production
-// actually uses. See testdata/README.md.
-func TestRealStillsFallOnTheExpectedSideOfTheThresholds(t *testing.T) {
+// The fixtures are real frames off this camera, and between them they cover
+// both signals and the boundary between them. See testdata/README.md.
+func TestRealStillsClassifyCorrectly(t *testing.T) {
 	for _, tc := range []struct {
-		file  string
-		want  float64 // measured from the 4K original
-		night bool
+		file     string
+		wantLuma float64
+		wantMono bool
+		night    bool
+		why      string
 	}{
-		{"day.jpg", 124.9, false},
-		{"valley.jpg", 107.0, false},
-		{"smoke.jpg", 144.9, false},
-		{"night.jpg", 10.6, true},
+		{"day.jpg", 124.9, false, false, "clear afternoon"},
+		{"valley.jpg", 107.0, false, false, "dimmest daylight on hand"},
+		{"smoke.jpg", 144.1, false, false, "wildfire haze, the brightest"},
+		{"dusk-colour.jpg", 64.2, false, false, "last colour frame before the IR switch"},
+		{"dusk-mono.jpg", 66.2, true, true, "first greyscale frame — nearly the same luma as the one before it"},
+		{"night.jpg", 10.5, false, true, "colour, but far too dark for black ink"},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
-			f, err := os.Open(filepath.Join("testdata", tc.file))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer f.Close() //nolint:errcheck // read-only
+			img := loadFixture(t, tc.file)
+			r := Measure(img)
 
-			img, _, err := image.Decode(f)
-			if err != nil {
-				t.Fatalf("decode: %v", err)
+			closeTo(t, r.Luma, tc.wantLuma, 2, "luma")
+			if !r.MonoKnown {
+				t.Fatalf("could not determine colour for %s; it is a JPEG and should always be answerable", tc.file)
 			}
-			luma := MeanLuma(img)
-
-			// A drift here means the fixture no longer stands in for the frame it
-			// was cut from, which would quietly hollow out the checks below.
-			closeTo(t, luma, tc.want, 2, "MeanLuma")
+			if r.Mono != tc.wantMono {
+				t.Errorf("mono = %v, want %v (chroma %.2f) — %s", r.Mono, tc.wantMono, MeanChroma(img), tc.why)
+			}
 
 			d := &Detector{Enter: DefaultEnter, Exit: DefaultExit}
-			night, _ := d.Observe(luma)
-			if night != tc.night {
-				t.Errorf("%s measured %.1f and was classified night=%v, want night=%v (band %.0f..%.0f)",
-					tc.file, luma, night, tc.night, DefaultEnter, DefaultExit)
-			}
-			// Daylight must also clear the upper threshold, or a frame like this
-			// could enter night and never get back out of it.
-			if !tc.night && luma < DefaultExit {
-				t.Errorf("%s measured %.1f, below the exit threshold of %.0f: it would not restore day",
-					tc.file, luma, DefaultExit)
+			if night, _ := d.Observe(r); night != tc.night {
+				t.Errorf("classified night=%v, want %v (luma %.1f, mono %v) — %s",
+					night, tc.night, r.Luma, r.Mono, tc.why)
 			}
 		})
 	}
 }
 
-// The margin is the reason these thresholds are safe to leave unattended. If a
-// change ever narrows it, that should be a deliberate decision rather than
-// something noticed the first time dusk misbehaves.
-//
-// The tightest real case is the dimmest daylight frame against the exit
-// threshold, at about 1.95x — daylight clears the enter threshold by a much
-// wider 3x, but it is getting back *out* of night that the exit threshold
-// governs, so that is the one to guard.
-func TestRealStillsKeepAWideMarginFromTheBand(t *testing.T) {
-	const wantRatio = 1.75
+// The pair either side of tonight's real IR switch, ten minutes apart. Their
+// luma is almost identical — 64.2 and 66.2 — so nothing keyed on brightness
+// could separate them, and the earlier frame is the *darker* of the two. This is
+// the case that made luma the fallback rather than the signal.
+func TestTheDuskSwitchIsInvisibleToLuma(t *testing.T) {
+	before := Measure(loadFixture(t, "dusk-colour.jpg"))
+	after := Measure(loadFixture(t, "dusk-mono.jpg"))
 
-	for _, tc := range []struct {
-		file      string
-		threshold float64
-		night     bool
-	}{
-		{"day.jpg", DefaultExit, false},
-		{"valley.jpg", DefaultExit, false},
-		{"night.jpg", DefaultEnter, true},
-	} {
-		t.Run(tc.file, func(t *testing.T) {
-			f, err := os.Open(filepath.Join("testdata", tc.file))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer f.Close() //nolint:errcheck // read-only
-
-			img, _, err := image.Decode(f)
-			if err != nil {
-				t.Fatalf("decode: %v", err)
-			}
-			luma := MeanLuma(img)
-
-			ratio := luma / tc.threshold
-			if tc.night {
-				ratio = tc.threshold / luma
-			}
-			if ratio < wantRatio {
-				t.Errorf("%s measures %.1f against a threshold of %.0f — only %.1fx margin, want at least %.1fx",
-					tc.file, luma, tc.threshold, ratio, wantRatio)
-			}
-		})
+	if math.Abs(before.Luma-after.Luma) > 5 {
+		t.Fatalf("the fixtures no longer straddle the switch at comparable brightness: %.1f then %.1f",
+			before.Luma, after.Luma)
 	}
+	if before.Mono || !after.Mono {
+		t.Fatalf("mono did not flip across the switch: before=%v after=%v", before.Mono, after.Mono)
+	}
+
+	d := &Detector{Enter: DefaultEnter, Exit: DefaultExit}
+	if night, _ := d.Observe(before); night {
+		t.Error("the last colour frame was called night")
+	}
+	if night, changed := d.Observe(after); !night || !changed {
+		t.Errorf("the first greyscale frame did not flip the state: night=%v changed=%v", night, changed)
+	}
+}
+
+// A single-channel JPEG carries no colour at all, so answering "unknown" for it
+// would push the one unambiguous case onto the fallback.
+func TestGrayImagesAreMono(t *testing.T) {
+	mono, ok := Mono(image.NewGray(image.Rect(0, 0, 8, 8)))
+	if !ok || !mono {
+		t.Errorf("Mono(*image.Gray) = %v, %v; want true, true", mono, ok)
+	}
+}
+
+// Anything that is not a decoded JPEG cannot answer, and must say so rather than
+// guessing "colour" — which would read as daylight.
+func TestUnknownColourModelDefersToLuma(t *testing.T) {
+	mono, ok := Mono(image.NewRGBA(image.Rect(0, 0, 8, 8)))
+	if ok || mono {
+		t.Errorf("Mono(*image.RGBA) = %v, %v; want false, false", mono, ok)
+	}
+
+	d := &Detector{Enter: DefaultEnter, Exit: DefaultExit}
+	if night, _ := d.Observe(Reading{Luma: 10, MonoKnown: false}); !night {
+		t.Error("a dark frame of unknown colour was not called night")
+	}
+	if night, _ := d.Observe(Reading{Luma: 120, MonoKnown: false}); night {
+		t.Error("a bright frame of unknown colour stayed night")
+	}
+}
+
+// Colour alone must not restore day while the frame is still too dark, or the
+// morning switch back would drop the treatment before the picture can carry it.
+func TestColourDoesNotRestoreDayWhileDark(t *testing.T) {
+	d := &Detector{Enter: DefaultEnter, Exit: DefaultExit}
+	d.Observe(Reading{Mono: true, MonoKnown: true}) // night
+
+	if night, _ := d.Observe(Reading{Luma: 60, Mono: false, MonoKnown: true}); !night {
+		t.Error("a dim colour frame ended night before it cleared the exit threshold")
+	}
+	if night, _ := d.Observe(Reading{Luma: 90, Mono: false, MonoKnown: true}); night {
+		t.Error("a bright colour frame did not end night")
+	}
+}
+
+func loadFixture(t *testing.T, name string) image.Image {
+	t.Helper()
+	f, err := os.Open(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close() //nolint:errcheck // read-only
+
+	img, _, err := image.Decode(f)
+	if err != nil {
+		t.Fatalf("decode %s: %v", name, err)
+	}
+	return img
 }

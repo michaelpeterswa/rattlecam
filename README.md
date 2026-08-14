@@ -430,27 +430,45 @@ The annotation is black ink. Over a daylit ridge that reads cleanly; against a
 night sky it disappears, taking with it the one element that could still tell a
 viewer what they are looking at. So after dark it is drawn inverted, in white.
 
-Night is measured from the frame itself — the mean luma of the still that is
-about to be published — rather than from a clock or a sun-position calculation.
-The question being asked is not "has the sun set" but "can black ink still be
-seen", and overcast, smoke, terrain shadow and the camera's own exposure move
-that answer hours either side of sunset. Measuring the picture answers it
-directly, and keeps working when Influx does not.
+Night is decided from the frame itself rather than a clock or a sun-position
+calculation, because the question is not "has the sun set" but "can black ink
+still be seen" — and overcast, smoke, terrain shadow and the camera's own
+exposure move that hours either side of sunset.
 
-Real frames from this site measure around 10 at night and above 100 in daylight,
-so the thresholds sit in the empty middle. Night clears the lower threshold by
-3.3x; the dimmest daylight frame on hand clears the upper one by 1.9x, which is
-the tighter of the two and the one that governs getting back out of night:
+The signal is the camera's IR-cut filter. When it swings out the sensor stops
+reporting colour, and a frame's mean chroma drops from double figures to exactly
+zero between one poll and the next. That is the camera's own judgement that the
+light has gone, it is a single unambiguous event, and it needs no calibration.
+
+Brightness alone will not do it, and a real dusk shows why:
+
+| | luma | chroma | |
+| --- | --- | --- | --- |
+| 21:00 | 64.1 | 11.3 | last colour frame |
+| 21:10 | 66.3 | **0.0** | first greyscale frame — *brighter* than the one before |
+
+Ten minutes apart, either side of the switch, and the later frame is the lighter
+of the two. Nothing keyed on brightness could separate them. Luma across that
+evening fell smoothly from 129 at midday to 41 at 22:00 with no step anywhere,
+and its night value moves tens of points with moon and cloud — measured between
+10 and 42 on different nights here.
+
+So luma is the fallback, not the signal. It still gets a say whenever the answer
+is not already mono, because a frame can be in colour and still be far too dark
+for black ink — one of the fixtures is exactly that, a colour frame at 10.5 luma.
+Either signal alone is enough to call it night; a frame must be both in colour
+and above `NIGHT_EXIT_LUMA` to return to day.
 
 | var | default | |
 |---|---|---|
-| `NIGHT_ENTER_LUMA` | `35` | at or below this, night begins |
-| `NIGHT_EXIT_LUMA` | `55` | at or above this, day resumes |
+| `NIGHT_ENTER_LUMA` | `50` | at or below this, night begins even in colour |
+| `NIGHT_EXIT_LUMA` | `75` | a colour frame at or above this restores day |
 | `NIGHT_INVERT_ANNOTATION` | `true` | set false to keep black ink around the clock |
 
-The two thresholds are a hysteresis band, and the gap between them is the point:
-with a single threshold, dusk sits on the boundary and the annotation's colour
-flips back and forth on every poll. Startup fails if they are not ordered.
+The two thresholds are a hysteresis band, and the gap between them matters
+because luma is a slope: with a single threshold, a camera relying on the
+fallback would flip on every poll through dusk. Startup fails if they are not
+ordered.
 
 Nothing else about the frame changes at night. The same live picture publishes on
 the same cadence, the data bar already carries its own backing so it survives a
@@ -459,8 +477,9 @@ the clock — a frame not archived tonight cannot be recovered tomorrow, and the
 bucket's lifecycle rules already tier old masters down to nearline and colder,
 which is the cheaper place to solve storage cost than by never writing them.
 
-`rattlecam_night` and `rattlecam_frame_luma` expose the state and the measurement
-behind it; graphing the latter over a day makes a wrong threshold obvious.
+`rattlecam_night` and `rattlecam_frame_luma` expose the state and the brightness
+behind it. The transition log line names which signal decided, so a threshold
+problem reads differently from a camera problem.
 
 To see the treatment without waiting for dark, point the preview harness at a
 night capture — `-night` defaults to `auto` and measures the still exactly as the
