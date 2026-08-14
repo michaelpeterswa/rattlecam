@@ -11,6 +11,7 @@ package light
 
 import (
 	"image"
+	"math"
 )
 
 // Rec. 601 luma coefficients — the same weighting JPEG uses, which is why the
@@ -34,6 +35,73 @@ func stride(n int) int {
 		return 1
 	}
 	return sampleStride
+}
+
+// MonoThreshold is the mean chroma below which a frame is considered greyscale.
+//
+// A camera in IR mode emits Cb and Cr pinned to 128, so the measurement is
+// exactly 0 rather than merely small — observed stepping from 11.35 to 0.00
+// between two consecutive frames at dusk. The threshold is well above that only
+// to tolerate a camera whose night mode leaves a slight tint; ordinary daylight
+// on this site sits above 13 even in the last minutes of civil twilight.
+const MonoThreshold = 2.0
+
+// MeanChroma returns how far a frame's colour sits from neutral, as the mean of
+// |Cb-128| + |Cr-128| on a 0-255 scale. It reports -1 for an image whose colour
+// model cannot answer the question.
+//
+// This is the better night signal on a camera with an IR-cut filter, and the
+// reason is that it is a step rather than a slope. Luma falls smoothly through
+// dusk and its night value depends on the moon, cloud and snow — measured
+// between 10 and 42 on different nights here, which straddles any threshold you
+// would pick. The filter swinging out is a single unambiguous event, and it is
+// the camera's own judgement that there is no longer enough light, which is very
+// nearly the question being asked.
+func MeanChroma(img image.Image) float64 {
+	y, ok := img.(*image.YCbCr)
+	if !ok {
+		return -1
+	}
+	b := y.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return -1
+	}
+	sx, sy := stride(b.Dx()), stride(b.Dy())
+
+	var sum float64
+	var n int
+	for py := b.Min.Y; py < b.Max.Y; py += sy {
+		for px := b.Min.X; px < b.Max.X; px += sx {
+			o := y.COffset(px, py)
+			sum += math.Abs(float64(y.Cb[o])-128) + math.Abs(float64(y.Cr[o])-128)
+			n++
+		}
+	}
+	if n == 0 {
+		return -1
+	}
+	return sum / float64(n)
+}
+
+// Mono reports whether a frame is greyscale, and whether that could be
+// determined at all.
+//
+// Two things count as greyscale, because two things produce it. This camera in
+// IR mode sends an ordinary three-channel JPEG with Cb and Cr pinned to neutral,
+// which decodes to YCbCr and is caught by the chroma measurement. Anything that
+// re-encodes such a frame is liable to notice the chroma is redundant and emit a
+// true single-channel JPEG instead, which decodes to image.Gray and carries no
+// colour information at all — unambiguously mono, and it would be perverse to
+// answer "unknown" for the one image type that cannot possibly be in colour.
+func Mono(img image.Image) (mono, ok bool) {
+	if _, isGray := img.(*image.Gray); isGray {
+		return true, true
+	}
+	c := MeanChroma(img)
+	if c < 0 {
+		return false, false
+	}
+	return c < MonoThreshold, true
 }
 
 // MeanLuma returns the mean luma of img on a 0-255 scale. An empty image is 0.
@@ -89,15 +157,23 @@ func MeanLuma(img image.Image) float64 {
 	return sum / float64(n)
 }
 
-// DefaultEnter and DefaultExit are the shipped thresholds, kept here so the
+// DefaultEnter and DefaultExit are the shipped luma thresholds, kept here so the
 // daemon and the preview harness cannot drift apart on what night means.
 //
-// They come from measuring real stills off this camera: night frames land near
-// 10 and daylight frames above 100, so the band sits in the empty middle with
-// roughly a factor of three of margin at each edge.
+// These are the fallback, not the primary signal — see Observe. They are set
+// from a full dusk sampled off this camera: daylight held 129 through the
+// afternoon and 94 at sunset, the last colour frame read 64, and the first
+// greyscale frames ran 66 down to 42 and still falling. A band of 50 to 75
+// therefore separates a frame that is definitely dark from one that is
+// definitely not, while leaving the ambiguous middle to hysteresis.
+//
+// The margin here is thinner than the mono signal's, which is the whole reason
+// mono leads: night luma has been observed anywhere from 10 to 42 depending on
+// moon and cloud, and a heavily overcast winter noon can approach the top of
+// this band from the other side.
 const (
-	DefaultEnter = 35.0
-	DefaultExit  = 55.0
+	DefaultEnter = 50.0
+	DefaultExit  = 75.0
 )
 
 // Detector converts a stream of luma measurements into a night flag.
@@ -125,12 +201,44 @@ func (d *Detector) Night() bool {
 	return d.night
 }
 
-// Observe feeds in one measurement and reports the state, and whether this
-// measurement changed it.
+// Reading is what one frame says about the light.
+type Reading struct {
+	Luma float64 // mean luma, 0-255
+	Mono bool    // the frame is greyscale
+	// MonoKnown is false when the frame's colour model could not answer, which
+	// is the only case where luma decides on its own.
+	MonoKnown bool
+}
+
+// Measure takes both readings off a decoded frame.
+func Measure(img image.Image) Reading {
+	mono, ok := Mono(img)
+	return Reading{Luma: MeanLuma(img), Mono: mono, MonoKnown: ok}
+}
+
+// Observe feeds in one frame's reading and reports the state, and whether this
+// reading changed it.
+//
+// Either signal on its own is enough to call it night; both must say otherwise
+// for it to be day.
+//
+// A greyscale frame settles it immediately. The IR filter swinging out is a
+// single unambiguous event and it is the camera's own judgement that the light
+// has gone, which is very nearly the question being asked. No hysteresis is
+// needed against a signal that cannot sit near its own boundary, and the camera
+// has its own dwell before it switches.
+//
+// But a colour frame does not settle it, which is the mistake worth not making.
+// A frame can be in colour and still be far too dark for black ink — a camera
+// held in colour mode, or one whose switch has not fired yet. Real evidence of
+// that is in the fixtures: a colour frame measuring 10.5 luma, which no viewer
+// would call daylight. So luma still gets its say whenever the answer is not
+// already mono, and only a frame that is both in colour and bright enough
+// returns to day.
 //
 // The first observation always reports changed, so a daemon starting up at 3am
 // logs that it is starting into the night rather than silently assuming day.
-func (d *Detector) Observe(luma float64) (night, changed bool) {
+func (d *Detector) Observe(r Reading) (night, changed bool) {
 	if d == nil {
 		return false, false
 	}
@@ -138,9 +246,11 @@ func (d *Detector) Observe(luma float64) (night, changed bool) {
 	d.started = true
 
 	switch {
-	case !d.night && luma <= d.Enter:
+	case r.MonoKnown && r.Mono:
 		d.night = true
-	case d.night && luma >= d.Exit:
+	case !d.night && r.Luma <= d.Enter:
+		d.night = true
+	case d.night && r.Luma >= d.Exit:
 		d.night = false
 	}
 	return d.night, first || d.night != was

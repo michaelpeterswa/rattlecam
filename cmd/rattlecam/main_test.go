@@ -1,6 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"os"
 	"strings"
 	"testing"
 )
@@ -15,23 +19,62 @@ func TestNewLoggerDefaults(t *testing.T) {
 	}
 }
 
-func TestNewLoggerAcceptsValidSettings(t *testing.T) {
-	for _, tc := range []struct{ level, format string }{
-		{"debug", "text"},
-		{"INFO", "json"},
-		{"Warn", ""},
-		{"error", "JSON"},
-		{"", "text"},
-		{"  info  ", "  json  "}, // padding from a compose file
-	} {
-		t.Run(tc.level+"/"+tc.format, func(t *testing.T) {
-			t.Setenv("LOG_LEVEL", tc.level)
-			t.Setenv("LOG_FORMAT", tc.format)
+func TestNewLoggerAcceptsValidLevels(t *testing.T) {
+	for _, level := range []string{"debug", "INFO", "Warn", "error", "", "  info  "} {
+		t.Run(level, func(t *testing.T) {
+			t.Setenv("LOG_LEVEL", level)
 
 			if _, err := newLogger(); err != nil {
-				t.Errorf("LOG_LEVEL=%q LOG_FORMAT=%q: %v", tc.level, tc.format, err)
+				t.Errorf("LOG_LEVEL=%q: %v", level, err)
 			}
 		})
+	}
+}
+
+// The output is JSON and there is no setting that makes it anything else, so a
+// collector can be pointed at it without conditions.
+func TestNewLoggerEmitsJSON(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = orig })
+
+	log, err := newLogger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.Info("hello", "luma", 41.6)
+	w.Close()
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(r); err != nil {
+		t.Fatal(err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, buf.String())
+	}
+	if got["msg"] != "hello" {
+		t.Errorf("msg = %v, want hello", got["msg"])
+	}
+	if got["luma"] != 41.6 {
+		t.Errorf("luma = %v, want 41.6 — structured fields must survive as fields", got["luma"])
+	}
+}
+
+// It must also be installed as the default, or anything using the package-level
+// functions writes plain text into the same stream.
+func TestNewLoggerBecomesTheDefault(t *testing.T) {
+	log, err := newLogger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slog.Default() != log {
+		t.Error("newLogger did not install itself as slog's default")
 	}
 }
 
@@ -41,8 +84,6 @@ func TestNewLoggerRejectsBadSettings(t *testing.T) {
 	for _, tc := range []struct{ key, val, want string }{
 		{"LOG_LEVEL", "verbose", "LOG_LEVEL"},
 		{"LOG_LEVEL", "9", "LOG_LEVEL"},
-		{"LOG_FORMAT", "logfmt", "LOG_FORMAT"},
-		{"LOG_FORMAT", "xml", "LOG_FORMAT"},
 	} {
 		t.Run(tc.key+"="+tc.val, func(t *testing.T) {
 			t.Setenv(tc.key, tc.val)

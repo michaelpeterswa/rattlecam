@@ -111,8 +111,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("still measures %.1f mean luma; rendering the %s treatment",
-		light.MeanLuma(src), map[bool]string{true: "night", false: "day"}[isNight])
+	if r := light.Measure(src); r.MonoKnown {
+		log.Printf("still is %s (chroma %.2f, luma %.1f); rendering the %s treatment",
+			map[bool]string{true: "greyscale", false: "colour"}[r.Mono],
+			light.MeanChroma(src), r.Luma,
+			map[bool]string{true: "night", false: "day"}[isNight])
+	} else {
+		log.Printf("still measures %.1f mean luma, colour unknown; rendering the %s treatment",
+			light.MeanLuma(src), map[bool]string{true: "night", false: "day"}[isNight])
+	}
 
 	h := &harness{
 		src:       src,
@@ -197,7 +204,7 @@ func resolveNight(mode string, src image.Image, enter, exit float64) (bool, erro
 		return false, nil
 	case "auto":
 		d := light.Detector{Enter: enter, Exit: exit}
-		night, _ := d.Observe(light.MeanLuma(src))
+		night, _ := d.Observe(light.Measure(src))
 		return night, nil
 	default:
 		return false, fmt.Errorf("-night: %q is not auto, on or off", mode)

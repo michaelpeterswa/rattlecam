@@ -45,6 +45,8 @@ func main() {
 	}
 }
 
+// newLogger builds the JSON logger, matching the daemon: same format, same
+// stream, so one collector reads both without being told they differ.
 func newLogger() (*slog.Logger, error) {
 	level := slog.LevelInfo
 	if raw := strings.TrimSpace(os.Getenv("LOG_LEVEL")); raw != "" {
@@ -52,7 +54,9 @@ func newLogger() (*slog.Logger, error) {
 			return nil, fmt.Errorf("LOG_LEVEL: %q is not a level", raw)
 		}
 	}
-	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})), nil
+	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
+	slog.SetDefault(log)
+	return log, nil
 }
 
 // source adapts the storage client to what the gateway needs, keeping the
