@@ -12,6 +12,7 @@
 # Built binaries.
 /preview
 /rattlecam
+/timelapse
 
 # Local tooling.
 /node_modules/
@@ -20,3 +21,9 @@
 # fill in is not.
 /deploy/**/.env
 /deploy/**/secrets/
+
+# Terraform's provider cache and state. The lock file is tracked so a plan
+# resolves the same provider versions everywhere.
+.terraform/
+*.tfstate
+*.tfstate.*

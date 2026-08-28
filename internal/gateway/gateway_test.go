@@ -58,7 +58,7 @@ func (s *fakeSource) Get(context.Context, string) (Object, error) {
 func newGateway(t *testing.T, src Source, cfg Config) *Gateway {
 	t.Helper()
 	if cfg.Objects == nil {
-		cfg.Objects = map[string]string{"/latest.jpg": "latest.jpg"}
+		cfg.Objects = map[string]Served{"/latest.jpg": {Object: "latest.jpg"}}
 	}
 	cfg.Log = slog.New(slog.DiscardHandler)
 	g, err := New(src, cfg)
@@ -369,10 +369,127 @@ func TestHealthz(t *testing.T) {
 }
 
 func TestNewValidates(t *testing.T) {
-	if _, err := New(nil, Config{Objects: map[string]string{"/a": "a"}}); err == nil {
+	if _, err := New(nil, Config{Objects: map[string]Served{"/a": {Object: "a"}}}); err == nil {
 		t.Error("want an error with no source")
 	}
 	if _, err := New(newSource("x"), Config{}); err == nil {
 		t.Error("want an error with no objects")
+	}
+}
+
+// --- timelapse videos --------------------------------------------------------
+
+// A <video> element seeks by asking for byte ranges. A server that answers the
+// whole file every time gives a scrubber that does not scrub, and on a monthly
+// that is a hundred megabytes per drag of the playhead.
+func TestServesAByteRangeSoAVideoCanSeek(t *testing.T) {
+	src := newSource("0123456789")
+	g := newGateway(t, src, Config{
+		Objects: map[string]Served{"/latest-monthly.mp4": {Object: "latest-monthly.mp4"}},
+	})
+	g.refreshAll(context.Background())
+
+	req := httptest.NewRequest("GET", "/latest-monthly.mp4", nil)
+	req.Header.Set("Range", "bytes=2-5")
+
+	rec := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206", rec.Code)
+	}
+	if got := rec.Body.String(); got != "2345" {
+		t.Errorf("body = %q, want %q", got, "2345")
+	}
+	if got := rec.Header().Get("Content-Range"); got != "bytes 2-5/10" {
+		t.Errorf("Content-Range = %q, want bytes 2-5/10", got)
+	}
+}
+
+// Range only works if the client is told it may ask.
+func TestAdvertisesRangeSupport(t *testing.T) {
+	src := newSource("frame")
+	g := newGateway(t, src, Config{})
+	g.refreshAll(context.Background())
+
+	rec := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/latest.jpg", nil))
+
+	if got := rec.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Errorf("Accept-Ranges = %q, want bytes", got)
+	}
+}
+
+// A frame must not be cached and a timelapse must be. Serving both from one
+// process means the header cannot be a single global value.
+func TestEachObjectCanCarryItsOwnCacheControl(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{
+		CacheControl: "no-cache, max-age=0, must-revalidate",
+		Objects: map[string]Served{
+			"/latest.jpg":         {Object: "latest.jpg"},
+			"/latest-monthly.mp4": {Object: "latest-monthly.mp4", CacheControl: "public, max-age=600"},
+		},
+	})
+	g.refreshAll(context.Background())
+
+	for path, want := range map[string]string{
+		"/latest.jpg":         "no-cache, max-age=0, must-revalidate",
+		"/latest-monthly.mp4": "public, max-age=600",
+	} {
+		rec := httptest.NewRecorder()
+		g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if got := rec.Header().Get("Cache-Control"); got != want {
+			t.Errorf("%s Cache-Control = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// The conditional request path is what keeps a poller cheap, and it has to keep
+// working now that the response goes through ServeContent.
+func TestAMatchingETagStillCostsNothing(t *testing.T) {
+	src := newSource("frame")
+	g := newGateway(t, src, Config{})
+	g.refreshAll(context.Background())
+
+	first := httptest.NewRecorder()
+	g.Handler().ServeHTTP(first, httptest.NewRequest("GET", "/latest.jpg", nil))
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("no ETag")
+	}
+
+	req := httptest.NewRequest("GET", "/latest.jpg", nil)
+	req.Header.Set("If-None-Match", etag)
+	second := httptest.NewRecorder()
+	g.Handler().ServeHTTP(second, req)
+
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("status = %d, want 304", second.Code)
+	}
+	if second.Body.Len() != 0 {
+		t.Errorf("304 carried %d bytes", second.Body.Len())
+	}
+}
+
+// A rate-limited caller must be turned away before any bytes are read, whatever
+// kind of object was asked for.
+func TestRateLimitingStillAppliesToVideos(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{
+		Objects:       map[string]Served{"/latest-monthly.mp4": {Object: "latest-monthly.mp4"}},
+		RatePerMinute: 1,
+		Burst:         1,
+	})
+	g.refreshAll(context.Background())
+
+	var last int
+	for range 5 {
+		rec := httptest.NewRecorder()
+		g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/latest-monthly.mp4", nil))
+		last = rec.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Errorf("status after five requests = %d, want 429", last)
 	}
 }

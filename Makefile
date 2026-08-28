@@ -12,9 +12,10 @@ tools: ## Install commitlint locally (used by the commit-msg hook)
 	npm install --no-save @commitlint/cli @commitlint/config-conventional
 
 .PHONY: build
-build: ## Build both binaries
+build: ## Build the binaries
 	$(GO) build -o rattlecam ./cmd/rattlecam
 	$(GO) build -o preview ./cmd/preview
+	$(GO) build -o timelapse ./cmd/timelapse
 
 .PHONY: test
 test: ## Run the test suite
@@ -24,15 +25,17 @@ test: ## Run the test suite
 lint: ## Run every linter CI runs
 	golangci-lint run
 	yamllint .
-	hadolint Dockerfile
+	hadolint Dockerfile Dockerfile.timelapse
+	terraform -chdir=deploy/timelapse fmt -check -diff
 
 .PHONY: image
-image: ## Build the container image
+image: ## Build the container images
 	docker build -t rattlecam:dev .
+	docker build -f Dockerfile.timelapse -t rattlecam-timelapse:dev .
 
 .PHONY: clean
 clean:
-	rm -f rattlecam preview
+	rm -f rattlecam preview timelapse
 	rm -rf out
 
 .PHONY: help

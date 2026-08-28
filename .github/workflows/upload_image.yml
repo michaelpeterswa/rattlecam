@@ -44,6 +44,44 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # The timelapse job is its own image because it needs ffmpeg, which has no
+  # place in the distroless image that runs on the mountain. It also needs no
+  # assets — it draws nothing, it only encodes what the daemon already drew.
+  timelapse-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}-timelapse
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      # amd64 only: this runs as a Cloud Run job, and building the arm64 half
+      # would double the build for an architecture nothing schedules it on.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.timelapse
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # The gateway runs on a host with no container runtime, installed from a
   # release asset the way the other services on that box are.
   gateway-binary:

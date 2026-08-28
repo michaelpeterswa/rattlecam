@@ -12,6 +12,7 @@
 //	GATEWAY_RATE     requests per minute per client     (default 120, 0 disables)
 //	GATEWAY_BURST    burst allowance per client         (default 20)
 //	CACHE_CONTROL    header sent with every frame
+//	TIMELAPSE_SERVE  also serve the timelapses         (default true)
 //	LOG_LEVEL        debug | info | warn | error
 package main
 
@@ -109,10 +110,38 @@ func run(log *slog.Logger) error {
 
 	// Only these are reachable. The archive is deliberately absent: it is a
 	// bulk-download surface, and nothing about the public feed needs it.
-	objects := map[string]string{
-		"/latest.jpg":       key("latest.jpg"),
-		"/latest-clean.jpg": key("latest-clean.jpg"),
-		"/latest-web.jpg":   key("latest-web.jpg"),
+	objects := map[string]gateway.Served{
+		"/latest.jpg":       {Object: key("latest.jpg")},
+		"/latest-clean.jpg": {Object: key("latest-clean.jpg")},
+		"/latest-web.jpg":   {Object: key("latest-web.jpg")},
+	}
+
+	// The timelapses, on the same terms: three fixed paths, not a listing of the
+	// dated ones, so this stays a set of names rather than a way to walk the
+	// bucket.
+	//
+	// They are held in memory like everything else here, and they are much
+	// larger than a frame — a month runs to a hundred megabytes or so. That is
+	// the cost of the same trade the frames make: read once per night rather
+	// than once per viewer. Set TIMELAPSE_SERVE=false on a host where that
+	// memory is not available.
+	if envBool("TIMELAPSE_SERVE", true) {
+		// A day old at worst, so unlike a frame they are worth caching — but
+		// only for minutes, because the stable name is rewritten every night.
+		const videoCache = "public, max-age=600"
+		for route, object := range map[string]string{
+			"/latest-daily.mp4":   "timelapse/latest-daily.mp4",
+			"/latest-weekly.mp4":  "timelapse/latest-weekly.mp4",
+			"/latest-monthly.mp4": "timelapse/latest-monthly.mp4",
+		} {
+			objects[route] = gateway.Served{
+				Object:       key(object),
+				CacheControl: videoCache,
+				// Absent until the nightly job has run once, which is not a
+				// fault worth a warning every ten seconds.
+				Optional: true,
+			}
+		}
 	}
 
 	g, err := gateway.New(source{client}, gateway.Config{
@@ -168,6 +197,18 @@ func envInt(k string, def int) int {
 		return def
 	}
 	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func envBool(k string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(k))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseBool(raw)
 	if err != nil {
 		return def
 	}
