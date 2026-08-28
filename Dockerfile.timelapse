@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+
+# The timelapse job, which is a separate image from the daemon for one reason:
+# it needs ffmpeg. The daemon ships on distroless with nothing in it but a static
+# binary, and putting a video encoder and its codec libraries into that image to
+# serve a job that runs once a night would enlarge the thing on the mountain to
+# suit the thing in the cloud.
+
+FROM golang:1.26-bookworm AS build
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/timelapse \
+    ./cmd/timelapse
+
+# Alpine rather than distroless because ffmpeg has to come from a package
+# manager, and rather than Debian because this image is mostly ffmpeg and its
+# codecs — the smaller base is a third of the pull, on a job that cold-starts
+# once a day.
+FROM alpine:3.21
+
+# Deliberately unpinned. The base is pinned to a minor release, which fixes the
+# package set that resolves here; pinning ffmpeg's exact version on top of that
+# would fail the build on every Alpine security update of a codec library, for a
+# job whose output is a video nobody's safety depends on.
+#
+# tzdata is not optional: the archive's day directories are named in the site's
+# local zone, and without it time.LoadLocation silently cannot find that zone.
+# ca-certificates is what lets the storage client verify Google's endpoint.
+#
+# 65532 matches the daemon's distroless "nonroot", so the two images agree on
+# what a non-root uid looks like.
+# hadolint ignore=DL3018
+RUN apk add --no-cache \
+    ffmpeg \
+    tzdata \
+    ca-certificates \
+    && adduser -D -u 65532 nonroot
+
+USER 65532:65532
+
+ENV TMPDIR=/tmp
+
+COPY --from=build /out/timelapse /usr/local/bin/timelapse
+
+ENTRYPOINT ["/usr/local/bin/timelapse"]

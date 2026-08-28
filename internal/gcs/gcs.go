@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/iterator"
 
 	"github.com/michaelpeterswa/rattlecam/internal/publish"
 )
@@ -82,6 +84,46 @@ func (c *Client) Put(ctx context.Context, name string, data []byte, opts publish
 		return fmt.Errorf("gcs: commit %s: %w", name, err)
 	}
 	return nil
+}
+
+// listTimeout bounds a listing, which is a different shape of operation from an
+// upload: many small round trips rather than one large one, and a month of
+// archived days is several thousand names.
+const listTimeout = 5 * time.Minute
+
+// List returns the names of every object under a prefix, sorted.
+//
+// Sorted because the archive encodes time in the name — zero-padded HHMMSS
+// under a zero-padded date — so lexical order is chronological order, and a
+// caller assembling a timelapse needs no other index.
+func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	defer cancel()
+
+	q := &storage.Query{Prefix: prefix}
+	// Ask only for the name. A full listing carries every attribute of every
+	// object, and on a few thousand frames that is most of the response body
+	// for something the caller discards.
+	if err := q.SetAttrSelection([]string{"Name"}); err != nil {
+		return nil, fmt.Errorf("gcs: list %s: %w", prefix, err)
+	}
+
+	var names []string
+	it := c.bucket.Objects(ctx, q)
+
+	for {
+		attrs, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gcs: list %s: %w", prefix, err)
+		}
+		names = append(names, attrs.Name)
+	}
+
+	sort.Strings(names)
+	return names, nil
 }
 
 // Close releases the underlying client.

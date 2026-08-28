@@ -13,11 +13,13 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,12 +40,33 @@ type Object struct {
 	ContentType string
 }
 
+// Served is one object the gateway exposes.
+type Served struct {
+	// Object is the name in the bucket.
+	Object string
+
+	// CacheControl overrides Config.CacheControl for this object. It exists
+	// because the two families of thing served here have opposite needs: a
+	// frame is replaced every few minutes and must not be cached, while a
+	// timelapse is rewritten once a night and re-fetching it per viewer would
+	// undo the arithmetic the gateway exists to do.
+	CacheControl string
+
+	// Optional marks an object that may legitimately not exist yet.
+	//
+	// The timelapses appear only after the nightly job has run once, and a
+	// gateway deployed before then would otherwise warn about all three of them
+	// every refresh — a log line every few seconds saying nothing is wrong. A
+	// missing frame is still a warning, because that one means something.
+	Optional bool
+}
+
 // Config describes what to serve and how hard callers may pull on it.
 type Config struct {
-	// Objects maps a request path to an object name in the bucket. Only these
-	// paths are served; anything else is a 404, so the gateway cannot be used
-	// to read arbitrary keys.
-	Objects map[string]string
+	// Objects maps a request path to an object in the bucket. Only these paths
+	// are served; anything else is a 404, so the gateway cannot be used to read
+	// arbitrary keys.
+	Objects map[string]Served
 
 	// Refresh is how often the generation is checked. It bounds how stale a
 	// served frame can be, and it is the only per-time cost the bucket sees.
@@ -125,8 +148,8 @@ func (g *Gateway) Run(ctx context.Context) {
 }
 
 func (g *Gateway) refreshAll(ctx context.Context) {
-	for _, object := range g.cfg.Objects {
-		g.refresh(ctx, object)
+	for _, served := range g.cfg.Objects {
+		g.refresh(ctx, served)
 	}
 	if g.limiter != nil {
 		g.limiter.sweep()
@@ -134,12 +157,22 @@ func (g *Gateway) refreshAll(ctx context.Context) {
 }
 
 // refresh downloads an object only when its generation has moved.
-func (g *Gateway) refresh(ctx context.Context, object string) {
+func (g *Gateway) refresh(ctx context.Context, served Served) {
+	object := served.Object
+
+	// An object that is allowed to be absent reports at debug; anything else is
+	// a warning, so the one that matters is not buried under the ones that do
+	// not.
+	report := g.log.Warn
+	if served.Optional {
+		report = g.log.Debug
+	}
+
 	gen, err := g.src.Generation(ctx, object)
 	if err != nil {
 		// A failure here leaves the previous frame in place, which is the point:
 		// a hiccup reaching the bucket should not take the feed down.
-		g.log.Warn("checking the object failed; serving the cached frame", "object", object, "error", err)
+		report("checking the object failed; serving the cached frame", "object", object, "error", err)
 		return
 	}
 
@@ -152,7 +185,7 @@ func (g *Gateway) refresh(ctx context.Context, object string) {
 
 	obj, err := g.src.Get(ctx, object)
 	if err != nil {
-		g.log.Warn("fetching the object failed; serving the cached frame", "object", object, "error", err)
+		report("fetching the object failed; serving the cached frame", "object", object, "error", err)
 		return
 	}
 
@@ -179,13 +212,13 @@ func (g *Gateway) Handler() http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
-	for path, object := range g.cfg.Objects {
-		mux.Handle("GET "+path, g.serve(object))
+	for route, served := range g.cfg.Objects {
+		mux.Handle("GET "+route, g.serve(served))
 	}
 	return mux
 }
 
-func (g *Gateway) serve(object string) http.Handler {
+func (g *Gateway) serve(served Served) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if g.limiter != nil && !g.limiter.allow(clientIP(r, g.trusted)) {
 			w.Header().Set("Retry-After", "60")
@@ -194,7 +227,7 @@ func (g *Gateway) serve(object string) http.Handler {
 		}
 
 		g.mu.RLock()
-		obj, ok := g.cached[object]
+		obj, ok := g.cached[served.Object]
 		g.mu.RUnlock()
 		if !ok {
 			http.Error(w, "no frame available", http.StatusServiceUnavailable)
@@ -206,24 +239,30 @@ func (g *Gateway) serve(object string) http.Handler {
 			contentType = "image/jpeg"
 		}
 
+		cacheControl := served.CacheControl
+		if cacheControl == "" {
+			cacheControl = g.cfg.CacheControl
+		}
+
 		// The generation is a precise version, so it makes a strong validator.
 		// A poller checking every ten seconds then costs a few hundred bytes
 		// instead of two megabytes, which is most of the egress saved.
 		etag := `"` + strconv.FormatInt(obj.Generation, 10) + `"`
 		w.Header().Set("ETag", etag)
-		w.Header().Set("Cache-Control", g.cfg.CacheControl)
+		w.Header().Set("Cache-Control", cacheControl)
 		w.Header().Set("Content-Type", contentType)
-		if !obj.Updated.IsZero() {
-			w.Header().Set("Last-Modified", obj.Updated.UTC().Format(http.TimeFormat))
-		}
 
-		if match := r.Header.Get("If-None-Match"); match == etag {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-
-		w.Header().Set("Content-Length", strconv.Itoa(len(obj.Data)))
-		_, _ = w.Write(obj.Data)
+		// ServeContent rather than a plain Write, for one reason: Range.
+		//
+		// A browser playing an mp4 asks for byte ranges — that is how seeking in
+		// a <video> element works, and a server that answers every request with
+		// the whole file gives a scrubber that does not scrub. It handles
+		// If-None-Match and If-Modified-Since on the way through, so the
+		// conditional path the frames rely on is unchanged.
+		//
+		// The reader is over a byte slice already in memory, so seeking within
+		// it costs nothing.
+		http.ServeContent(w, r, path.Base(served.Object), obj.Updated, bytes.NewReader(obj.Data))
 	})
 }
 

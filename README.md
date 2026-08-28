@@ -86,7 +86,7 @@ Three artifacts per cycle:
 | `latest.jpg` | Branded, overlaid — the public frame |
 | `latest-clean.jpg` | Unbranded, for outlets applying their own graphics — the camera's own bytes, unmodified |
 | `latest-web.jpg` | The branded frame narrowed to `WEB_WIDTH`, for websites. Not archived |
-| `archive/YYYY/MM/DD/HHMMSS.jpg` | Clean master, for timelapses later |
+| `archive/YYYY/MM/DD/HHMMSS.jpg` | Clean master, which `cmd/timelapse` later turns into the day, week and month videos |
 
 All writes go temp-file → `rename`, so a web server never serves a torn frame.
 
@@ -128,6 +128,8 @@ text — so give it a corner instead (`"top-left"` and friends) and size it with
 go mod tidy
 go build ./cmd/rattlecam
 ```
+
+`cmd/timelapse` needs `ffmpeg` on `PATH`; nothing else here does.
 
 ### Getting the Protect credentials
 
@@ -389,6 +391,103 @@ img.src = URL.createObjectURL(await res.blob());
 `cache: no-cache` still sends `If-None-Match`; it means "revalidate", not "do not
 cache". Sixty seconds matches the publish cadence — polling faster only buys 304s.
 
+## Timelapses
+
+`cmd/timelapse` builds three videos a night from the archive, and puts them in
+the bucket next to the frames.
+
+| Object | Window | Frames | Runs for |
+| --- | --- | --- | --- |
+| `timelapse/latest-daily.mp4` | yesterday | ~142 | 6s |
+| `timelapse/latest-weekly.mp4` | last 7 days | ~1,000 | 41s |
+| `timelapse/latest-monthly.mp4` | last 30 days, daylight only | ~2,700 | 1:52 |
+
+Each is also written under a dated name — `timelapse/monthly/2026-08-26.mp4` —
+which never changes once written and caches for a year, while the `latest-*`
+names are rewritten nightly and cache for ten minutes.
+
+It does not run on the tower. A month of masters is a couple of gigabytes to
+read, the uplink has already carried every one of those frames once, and reading
+them back to make a video would spend it a second time on data already sitting in
+the bucket. The job runs in the bucket's own region instead, where that traffic
+is free. `deploy/timelapse` is the Cloud Run job and the schedule.
+
+### One day encoded once
+
+A day is encoded into two segments — the whole day, and the daylight hours on
+their own — which are kept in the bucket. The products are then stitched from
+segments with `ffmpeg -c copy`, which copies the compressed stream without
+decoding it. A month joins in about fifty milliseconds and loses nothing, because
+no pixel is re-encoded. So a night encodes one day, not thirty.
+
+A run that finds a segment missing builds it, and that is the entire recovery
+story: the first run builds the window, a run after an outage builds the days it
+missed, and no state lives anywhere but the bucket.
+
+The catch is that segments can only be joined when they were encoded identically.
+Join a 1280-wide segment to a 1920-wide one and the second half of the result
+decodes to garbage, with nothing anywhere reporting an error. So the settings are
+part of the name:
+
+```
+timelapse/segments/1280w-24fps-crf25/2026-08-26.mp4
+```
+
+Change the width, the rate or the quality and the next run cannot see the old
+segments at all. It builds a fresh set under the new name, which costs one
+rebuild of the window and cannot corrupt a month.
+
+### Why the month drops the night
+
+The same IR-cut signal the overlay uses — see [Night](#night) — decides it, read
+back off the archived frame rather than recomputed from a clock. Measured over
+three days here it is unambiguous: exactly two transitions a day, chroma stepping
+from 11–15 straight to 0.00, about 89 of 142 frames in colour in late August.
+
+Dropping them is about watchability, not storage. It takes 37% off the running
+time and only about 14% off the bytes, because a black frame compresses to
+almost nothing while a daylit ridge does not. What it removes is forty minutes
+of identical dark rectangle from a video meant to show a season moving.
+
+### Size is set by frame count, not duration
+
+At ten-minute spacing consecutive frames share almost nothing, so x264 has no
+temporal redundancy to work with and every frame costs roughly a full still —
+about 33 kB at 1280 and CRF 25. A month is therefore around 130 MB however long
+it runs, and halving the frame rate halves the duration without saving a byte.
+
+Turning the archive cadence up would make frames *cheaper*, not dearer: at a
+minute apart they start to correlate and inter-frame prediction begins working.
+
+```
+GCS_BUCKET              bucket holding the archive          (required)
+GCS_PREFIX              key prefix inside the bucket
+TZ                      zone the archive's days are in      (default America/Los_Angeles)
+FFMPEG                  ffmpeg binary                       (default ffmpeg, from PATH)
+TIMELAPSE_FPS           output frame rate                   (default 24)
+TIMELAPSE_WIDTH         output width in pixels              (default 1280)
+TIMELAPSE_CRF           x264 quality, lower is larger       (default 25)
+TIMELAPSE_PRESET        x264 preset                         (default slow)
+TIMELAPSE_WEEK_DAYS     days in the weekly                  (default 7)
+TIMELAPSE_MONTH_DAYS    days in the monthly                 (default 30)
+TIMELAPSE_BUILD_BUDGET  segments one run may encode         (default 31)
+TIMELAPSE_WORKERS       concurrent downloads and decodes    (default 8)
+TIMELAPSE_WORKDIR       scratch space                       (default a temp directory)
+```
+
+`TZ` has to match the daemon's. The archive's day directories are named in the
+site's local zone by whichever process wrote them, so a job resolving dates in
+UTC would build a "day" that starts at five in the afternoon.
+
+Build one day again by deleting its segments first — they are never rebuilt while
+they exist, which is what keeps a night cheap:
+
+```sh
+gcloud storage rm "gs://BUCKET/timelapse/segments/*/2026-08-26*.mp4"
+gcloud run jobs execute rattlecam-timelapse --region us-west1 \
+  --args=-date=2026-08-26 --wait
+```
+
 ## The gateway
 
 `cmd/gateway` serves the published frames from a **private** bucket, so the
@@ -404,9 +503,27 @@ generation changes, so bucket cost is a function of time rather than of audience
 Frames are served with an `ETag` taken from the generation, so a poller checking
 every ten seconds costs a few hundred bytes rather than two megabytes.
 
-Only `/latest.jpg` and `/latest-clean.jpg` are reachable. The archive is
-deliberately absent: it is a bulk-download surface and nothing about the public
-feed needs it.
+Only a fixed set of paths is reachable — the three frames and the three
+timelapses, by name. The archive is deliberately absent, and so are the dated
+videos: both are bulk-download surfaces, and serving a name rather than a listing
+is what keeps this from being a way to walk the bucket.
+
+```
+/latest.jpg  /latest-clean.jpg  /latest-web.jpg
+/latest-daily.mp4  /latest-weekly.mp4  /latest-monthly.mp4
+```
+
+The videos are held in memory like everything else here, and they are much larger
+than a frame — a month runs to something like 130 MB. That is the same trade the
+frames make, read once a night rather than once per viewer, but it is real
+memory: budget a few hundred megabytes, or set `TIMELAPSE_SERVE=false` on a host
+that has not got it. They are served through `http.ServeContent`, so a `<video>`
+element can seek — a scrubber needs `Range`, and a server that answers every
+request with the whole file has one that does not scrub.
+
+Until the nightly job has run once the three video objects do not exist. That is
+expected rather than a fault, so it is logged at debug and the paths return 503;
+a missing *frame* is still a warning, because that one means something.
 
 ```
 GATEWAY_ADDR     listen address                     (default :8080)
@@ -416,6 +533,7 @@ GATEWAY_REFRESH  how often to check for a new frame (default 10s)
 GATEWAY_RATE     requests per minute per client     (default 120, 0 disables)
 GATEWAY_BURST    burst allowance per client         (default 20)
 CACHE_CONTROL    header sent with every frame
+TIMELAPSE_SERVE  also serve the timelapses          (default true)
 ```
 
 A failure reaching the bucket leaves the cached frame in place; a hiccup should

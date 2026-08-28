@@ -12,6 +12,7 @@
 # Built binaries.
 /preview
 /rattlecam
+/timelapse
 
 # Local tooling.
 /node_modules/
@@ -20,3 +21,14 @@
 # fill in is not.
 /deploy/**/.env
 /deploy/**/secrets/
+
+# Terraform's provider cache, state and lock file. deploy/timelapse is a
+# reference copy of a module that is applied from the infrastructure repository,
+# never from here — so a lock file committed alongside it would pin provider
+# hashes nothing in this repository verifies, go stale unnoticed, and suggest
+# this is the configuration that actually runs. The real one is next to the real
+# state.
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
