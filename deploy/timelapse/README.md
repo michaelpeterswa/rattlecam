@@ -91,9 +91,9 @@ Mind the trailing slash. `timelapse/weekly` would also match
 ```sh
 terraform init
 terraform apply \
-  -var project=rm-main-p-hj56 \
-  -var bucket=rm-main-p-hj56-rattlecam \
-  -var image=ghcr.io/michaelpeterswa/rattlecam-timelapse:1.2.0
+  -var project=PROJECT_ID \
+  -var bucket=BUCKET \
+  -var image=ghcr.io/michaelpeterswa/rattlecam-timelapse:1.9.0
 ```
 
 Then run it once by hand rather than waiting for midnight:
