@@ -1,0 +1,102 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rattlesnake Mountain camera — available files</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa;
+    --fg: #1a1a18;
+    --muted: #6b6b64;
+    --rule: #e2e2dc;
+    --card: #ffffff;
+    --accent: #2f6f4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16171a;
+      --fg: #e9e9e4;
+      --muted: #9a9a92;
+      --rule: #2b2d31;
+      --card: #1d1f23;
+      --accent: #7cc4a0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.5rem; margin: 0 0 .35rem; letter-spacing: -.01em; }
+  .lede { color: var(--muted); margin: 0 0 2.5rem; max-width: 44rem; }
+  h2 {
+    font-size: .78rem; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--accent); margin: 2.5rem 0 .3rem;
+  }
+  .note { color: var(--muted); font-size: .85rem; margin: 0 0 .9rem; }
+  .rows { border-top: 1px solid var(--rule); }
+  .row {
+    display: grid;
+    grid-template-columns: minmax(12rem, 20rem) 1fr auto;
+    gap: .35rem 1.25rem;
+    align-items: baseline;
+    padding: .8rem .25rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  .row:hover { background: var(--card); }
+  a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--accent); }
+  a:hover { color: var(--accent); }
+  code {
+    font: .92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-all;
+  }
+  .desc { color: var(--muted); font-size: .9rem; }
+  .meta {
+    color: var(--muted); font-size: .8rem; text-align: right; white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .pending { color: var(--muted); font-style: italic; }
+  footer { margin-top: 3rem; color: var(--muted); font-size: .8rem; }
+  @media (max-width: 40rem) {
+    .row { grid-template-columns: 1fr; }
+    .meta { text-align: left; }
+  }
+</style>
+<main>
+  <h1>Rattlesnake Mountain camera</h1>
+  <p class="lede">
+    Everything this host serves, and what each thing is. Frames come straight
+    off the camera; the timelapses are assembled from the archive once a night,
+    except today's, which is rebuilt every half hour.
+  </p>
+
+  {{range .Groups}}
+  <h2>{{.Name}}</h2>
+  {{if .Note}}<p class="note">{{.Note}}</p>{{end}}
+  <div class="rows">
+    {{range .Entries}}
+    <div class="row">
+      <code><a href="{{.Path}}">{{.Path}}</a></code>
+      <span class="desc">{{.Description}}</span>
+      <span class="meta">
+        {{if .Available}}{{.Size}}{{if .Updated}} · {{.Updated}}{{end}}{{else}}<span class="pending">not built yet</span>{{end}}
+      </span>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+
+  <footer>
+    <p>
+      Every file carries an <code>ETag</code>. Re-fetch the same URL and a
+      revalidation costs a few hundred bytes instead of the whole thing — a
+      cache-busting query string throws that away and makes every request a full
+      transfer.
+    </p>
+    <p>Generated {{.Generated}}.</p>
+  </footer>
+</main>

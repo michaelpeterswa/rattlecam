@@ -112,9 +112,24 @@ func run(log *slog.Logger) error {
 	// Only these are reachable. The archive is deliberately absent: it is a
 	// bulk-download surface, and nothing about the public feed needs it.
 	objects := map[string]gateway.Served{
-		"/latest.jpg":       {Object: key("latest.jpg")},
-		"/latest-clean.jpg": {Object: key("latest-clean.jpg")},
-		"/latest-web.jpg":   {Object: key("latest-web.jpg")},
+		"/latest-web.jpg": {
+			Object:      key("latest-web.jpg"),
+			Title:       "Web frame",
+			Description: "The branded frame narrowed for websites. Start here — it is a fraction of the bytes and indistinguishable in a browser.",
+			Order:       10,
+		},
+		"/latest.jpg": {
+			Object:      key("latest.jpg"),
+			Title:       "Full frame",
+			Description: "The branded frame at the camera's full resolution, for outlets compositing their own graphics.",
+			Order:       20,
+		},
+		"/latest-clean.jpg": {
+			Object:      key("latest-clean.jpg"),
+			Title:       "Clean frame",
+			Description: "Unbranded, the camera's own bytes passed through untouched.",
+			Order:       30,
+		},
 	}
 
 	// The timelapses, on the same terms: fixed paths, not a listing of the dated
@@ -131,6 +146,7 @@ func run(log *slog.Logger) error {
 	// that memory is not available.
 	if envBool("TIMELAPSE_SERVE", true) {
 		layout := timelapse.Layout{Prefix: prefix}
+		order := 100
 		for _, kind := range timelapse.Kinds {
 			for _, variant := range timelapse.Variants(kind) {
 				// Today is rebuilt every half hour and everything else once a
@@ -139,6 +155,7 @@ func run(log *slog.Logger) error {
 				if kind == timelapse.Today {
 					cache = "public, max-age=300"
 				}
+				order += 10
 				for _, object := range []string{
 					layout.Latest(kind, variant),
 					layout.LatestGIF(kind, variant),
@@ -146,6 +163,9 @@ func run(log *slog.Logger) error {
 					objects["/"+path.Base(object)] = gateway.Served{
 						Object:       object,
 						CacheControl: cache,
+						Title:        timelapse.Title(kind, variant),
+						Description:  timelapse.Describe(kind, variant),
+						Order:        order,
 						// Absent until the relevant job has run once, which is
 						// not a fault worth a warning every ten seconds.
 						Optional: true,
