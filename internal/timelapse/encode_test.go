@@ -2,6 +2,7 @@ package timelapse
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -398,23 +399,84 @@ func TestTheStampIsDrawnAfterTheDeflicker(t *testing.T) {
 }
 
 func TestTheStampSitsInTheOppositeCornerToTheCrest(t *testing.T) {
-	chain := (&Encoder{Font: "/f.ttf", StampMargin: 0.025}).filters(720)
+	e := &Encoder{Width: 1280, Font: "/f.ttf", StampHeight: 0.045, StampMargin: 0.025}
+	chain := e.filters(720)
 
-	// Right edge, measured back by the text width, and down from the top.
-	if !strings.Contains(chain, "x=w-tw-18") {
-		t.Errorf("chain = %q, want the stamp inset from the right edge", chain)
-	}
+	// 2.5% of 720 is 18, and the box is pinned that far in from the right edge
+	// of a 1280-wide frame rather than measured back from the text.
 	if !strings.Contains(chain, "y=18") {
 		t.Errorf("chain = %q, want the stamp inset from the top", chain)
+	}
+	if strings.Contains(chain, "w-tw") {
+		t.Errorf("chain = %q, still positions the stamp by its text width", chain)
 	}
 }
 
 // This sky runs from near-white at midday to black overnight and no single text
 // colour survives both.
 func TestTheStampHasABackingBox(t *testing.T) {
-	chain := (&Encoder{Font: "/f.ttf"}).filters(720)
-	if !strings.Contains(chain, "box=1") || !strings.Contains(chain, "boxcolor=") {
+	chain := (&Encoder{Width: 1280, Font: "/f.ttf"}).filters(720)
+	if !strings.Contains(chain, "drawbox=") || !strings.Contains(chain, "color=black@") {
 		t.Errorf("chain = %q, want a backing box", chain)
+	}
+	// Drawn separately and before the text, so the text lands on top of it.
+	if strings.Index(chain, "drawbox=") > strings.Index(chain, "drawtext=") {
+		t.Errorf("chain = %q, want the box drawn before the text", chain)
+	}
+}
+
+// The face has proportional digits, so a box that hugs the text changes width as
+// the clock advances — and anchored to the right, its left edge twitches against
+// open sky every time a digit changes. The box has to be a constant, independent
+// of what it is going to contain.
+func TestTheStampBoxDoesNotMoveWithTheDigits(t *testing.T) {
+	e := &Encoder{Width: 1280, Font: "/f.ttf", StampHeight: 0.045, StampMargin: 0.025}
+	chain := e.filters(720)
+
+	// Nothing in the geometry may depend on the rendered text.
+	for _, dynamic := range []string{"tw", "text_w", "max_glyph_w"} {
+		if strings.Contains(chain, dynamic) {
+			t.Errorf("chain = %q, geometry depends on %q and will move with the text", chain, dynamic)
+		}
+	}
+
+	// And drawtext must not draw its own box, or that one would hug the text.
+	if strings.Contains(chain, "box=1") {
+		t.Errorf("chain = %q, drawtext is still boxing its own text", chain)
+	}
+}
+
+// The box is pinned to the right-hand edge, so a wider frame moves it right by
+// exactly the same amount.
+func TestTheStampTracksTheFrameWidth(t *testing.T) {
+	narrow := (&Encoder{Width: 1280, Font: "/f.ttf"}).stamp(1280, 720)
+	wide := (&Encoder{Width: 1920, Font: "/f.ttf"}).stamp(1920, 720)
+
+	if narrow == wide {
+		t.Fatal("the stamp is placed identically at two different frame widths")
+	}
+	if !strings.Contains(narrow, "drawbox=x=") || !strings.Contains(wide, "drawbox=x=") {
+		t.Fatalf("no box origin:\n%s\n%s", narrow, wide)
+	}
+}
+
+// The text is inset from the box edge rather than flush against it.
+func TestTheStampTextIsPaddedInsideItsBox(t *testing.T) {
+	e := &Encoder{Width: 1280, Font: "/f.ttf", StampHeight: 0.045, StampMargin: 0.025}
+	chain := e.stamp(1280, 720)
+
+	var boxX, textX int
+	if _, err := fmt.Sscanf(chain[strings.Index(chain, "drawbox=x=")+len("drawbox=x="):], "%d", &boxX); err != nil {
+		t.Fatalf("no box origin in %q", chain)
+	}
+	after := chain[strings.Index(chain, "fontcolor")-40:]
+	if i := strings.Index(chain, ":x="); i >= 0 {
+		if _, err := fmt.Sscanf(chain[i+3:], "%d", &textX); err != nil {
+			t.Fatalf("no text origin in %q (%q)", chain, after)
+		}
+	}
+	if textX <= boxX {
+		t.Errorf("text starts at %d and the box at %d; the text should be padded inside it", textX, boxX)
 	}
 }
 
