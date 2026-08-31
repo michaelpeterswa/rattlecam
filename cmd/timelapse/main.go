@@ -12,6 +12,13 @@
 // whole window and a run after an outage repairs itself with no separate
 // command and no state outside the bucket.
 //
+//	TIMELAPSE_MODE          nightly | today                     (default nightly)
+//	TIMELAPSE_LOGO          logo object in the bucket           (default assets/logo.png)
+//	TIMELAPSE_LOGO_HEIGHT   logo height as a fraction of frame  (default 0.34)
+//	TIMELAPSE_LOGO_MARGIN   inset as a fraction of frame height (default 0.025)
+//	TIMELAPSE_GIF_WIDTH     preview width in pixels             (default 480)
+//	TIMELAPSE_GIF_FPS       preview playback rate               (default 12)
+//	TIMELAPSE_GIF_FRAMES    preview frame cap                   (default 200)
 //	GCS_BUCKET              bucket holding the archive          (required)
 //	GCS_PREFIX              key prefix inside the bucket
 //	TZ                      zone the archive's days are in      (default America/Los_Angeles)
@@ -36,6 +43,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -96,8 +105,13 @@ func (s store) Put(ctx context.Context, name string, data []byte, contentType, c
 }
 
 func run(log *slog.Logger) error {
-	date := flag.String("date", "", "day to build, as YYYY-MM-DD (default: yesterday)")
+	date := flag.String("date", "", "day to build, as YYYY-MM-DD (default: yesterday, or today in -mode today)")
+	mode := flag.String("mode", envString("TIMELAPSE_MODE", "nightly"), "nightly or today")
 	flag.Parse()
+
+	if *mode != "nightly" && *mode != "today" {
+		return fmt.Errorf("-mode %q: want nightly or today", *mode)
+	}
 
 	bucket := strings.TrimSpace(os.Getenv("GCS_BUCKET"))
 	if bucket == "" {
@@ -113,7 +127,7 @@ func run(log *slog.Logger) error {
 	// The archive's day directories are named in this zone, because the daemon
 	// writing them runs with this TZ set. Resolving the date anywhere else would
 	// build a "day" that starts at five in the afternoon.
-	day, err := resolveDate(*date, loc)
+	day, err := resolveDate(*date, loc, *mode)
 	if err != nil {
 		return err
 	}
@@ -131,20 +145,33 @@ func run(log *slog.Logger) error {
 		}
 	}()
 
-	enc := &timelapse.Encoder{
-		FFmpeg:  envString("FFMPEG", "ffmpeg"),
-		FPS:     envInt("TIMELAPSE_FPS", timelapse.DefaultFPS),
-		Width:   envInt("TIMELAPSE_WIDTH", timelapse.DefaultWidth),
-		CRF:     envInt("TIMELAPSE_CRF", timelapse.DefaultCRF),
-		Preset:  envString("TIMELAPSE_PRESET", timelapse.DefaultPreset),
-		Timeout: envDuration("TIMELAPSE_ENCODE_TIMEOUT", timelapse.DefaultTimeout),
-	}
-
 	workDir, cleanup, err := workDir()
 	if err != nil {
 		return err
 	}
 	defer cleanup(log)
+
+	// The branding is fetched rather than baked into the image, for the same
+	// reason the daemon reads its assets from disk: the artwork is the agency's
+	// and is not in the repository, so an image built by CI cannot contain it.
+	// Keeping it in the bucket also means changing the crest needs no new image.
+	logo, err := fetchLogo(ctx, client, workDir, log)
+	if err != nil {
+		return err
+	}
+
+	enc := &timelapse.Encoder{
+		FFmpeg:     envString("FFMPEG", "ffmpeg"),
+		FFprobe:    envString("FFPROBE", "ffprobe"),
+		FPS:        envInt("TIMELAPSE_FPS", timelapse.DefaultFPS),
+		Width:      envInt("TIMELAPSE_WIDTH", timelapse.DefaultWidth),
+		CRF:        envInt("TIMELAPSE_CRF", timelapse.DefaultCRF),
+		Preset:     envString("TIMELAPSE_PRESET", timelapse.DefaultPreset),
+		Timeout:    envDuration("TIMELAPSE_ENCODE_TIMEOUT", timelapse.DefaultTimeout),
+		Logo:       logo,
+		LogoHeight: envFloat("TIMELAPSE_LOGO_HEIGHT", timelapse.DefaultLogoHeight),
+		LogoMargin: envFloat("TIMELAPSE_LOGO_MARGIN", timelapse.DefaultLogoMargin),
+	}
 
 	b := &timelapse.Builder{
 		Store: store{client},
@@ -155,7 +182,24 @@ func run(log *slog.Logger) error {
 		Enc:     enc,
 		WorkDir: workDir,
 		Workers: envInt("TIMELAPSE_WORKERS", 8),
-		Log:     log,
+		GIF: timelapse.GIFOptions{
+			Width:     envInt("TIMELAPSE_GIF_WIDTH", timelapse.DefaultGIFWidth),
+			FPS:       envInt("TIMELAPSE_GIF_FPS", timelapse.DefaultGIFFPS),
+			MaxFrames: envInt("TIMELAPSE_GIF_FRAMES", timelapse.DefaultGIFMaxFrames),
+		},
+		Log: log,
+	}
+
+	if *mode == "today" {
+		log.Info("timelapse started",
+			"mode", "today", "day", day.Format(timelapse.DateFormat), "bucket", bucket,
+			"zone", zone, "settings", enc.Fingerprint(), "branded", logo != "")
+		start := time.Now()
+		if err := b.Today(ctx, day); err != nil {
+			return err
+		}
+		log.Info("timelapse finished", "elapsed", time.Since(start).Round(time.Second))
+		return nil
 	}
 
 	weekDays := envInt("TIMELAPSE_WEEK_DAYS", 7)
@@ -166,8 +210,8 @@ func run(log *slog.Logger) error {
 	}
 
 	log.Info("timelapse started",
-		"day", day.Format(timelapse.DateFormat), "bucket", bucket, "zone", zone,
-		"settings", enc.Fingerprint(), "week", weekDays, "month", monthDays)
+		"mode", "nightly", "day", day.Format(timelapse.DateFormat), "bucket", bucket, "zone", zone,
+		"settings", enc.Fingerprint(), "week", weekDays, "month", monthDays, "branded", logo != "")
 
 	start := time.Now()
 
@@ -187,22 +231,41 @@ func run(log *slog.Logger) error {
 	// Each product is attempted even if an earlier one failed. They are
 	// independent, and a week that cannot be built is no reason to skip the
 	// month that could have been.
+	// Windows are intersected with what Ensure actually produced. Without this a
+	// day the archive has never held is reported twice — once as "no frames
+	// archived" and again as "the segment is unavailable" carrying an error
+	// string that reads like a fault. A log that cries wolf on a known-empty day
+	// is worse than one that says nothing.
+	have := make(map[string]bool, len(ready))
+	for _, d := range ready {
+		have[d.Format(timelapse.DateFormat)] = true
+	}
+	usable := func(days []time.Time) []time.Time {
+		out := days[:0:0]
+		for _, d := range days {
+			if have[d.Format(timelapse.DateFormat)] {
+				out = append(out, d)
+			}
+		}
+		return out
+	}
+
+	// Which variants exist is timelapse.Variants, the same matrix the gateway
+	// reads to decide what to serve.
+	windows := map[timelapse.Kind][]time.Time{
+		timelapse.Yesterday: timelapse.Window(day, 1),
+		timelapse.Weekly:    timelapse.Window(day, weekDays),
+		timelapse.Monthly:   month,
+	}
+
 	var errs []error
-	for _, p := range []struct {
-		kind    timelapse.Kind
-		days    []time.Time
-		variant timelapse.Variant
-	}{
-		{timelapse.Daily, timelapse.Window(day, 1), timelapse.Full},
-		{timelapse.Weekly, timelapse.Window(day, weekDays), timelapse.Full},
-		// The month is the one that drops the night. A third of every day is a
-		// black rectangle, and thirty of them is forty minutes of nothing in a
-		// video meant to show a season moving.
-		{timelapse.Monthly, month, timelapse.DaylightOnly},
-	} {
-		if err := b.Product(ctx, p.kind, day, p.days, p.variant); err != nil {
-			log.Error("building a product failed", "kind", string(p.kind), "error", err)
-			errs = append(errs, err)
+	for _, kind := range []timelapse.Kind{timelapse.Yesterday, timelapse.Weekly, timelapse.Monthly} {
+		for _, variant := range timelapse.Variants(kind) {
+			if err := b.Product(ctx, kind, variant, day, usable(windows[kind])); err != nil {
+				log.Error("building a product failed",
+					"kind", string(kind), "variant", string(variant), "error", err)
+				errs = append(errs, err)
+			}
 		}
 	}
 
@@ -210,14 +273,19 @@ func run(log *slog.Logger) error {
 	return errors.Join(errs...)
 }
 
-// resolveDate turns the flag into a day in loc, defaulting to yesterday.
+// resolveDate turns the flag into a day in loc.
 //
-// Yesterday rather than today because a day is only worth encoding once it is
-// over: run against today and the result is however much of it had happened by
-// half past midnight.
-func resolveDate(raw string, loc *time.Location) (time.Time, error) {
+// The nightly build defaults to yesterday, because a day is only worth encoding
+// into the archive of products once it is over. The today build defaults to
+// today, which is the whole point of it: the result is however much of the day
+// has happened, which is what a page wants to show at four in the afternoon.
+func resolveDate(raw string, loc *time.Location, mode string) (time.Time, error) {
 	if raw == "" {
-		return timelapse.Day(time.Now().In(loc)).AddDate(0, 0, -1), nil
+		today := timelapse.Day(time.Now().In(loc))
+		if mode == "today" {
+			return today, nil
+		}
+		return today.AddDate(0, 0, -1), nil
 	}
 	t, err := time.ParseInLocation(timelapse.DateFormat, raw, loc)
 	if err != nil {
@@ -248,6 +316,57 @@ func workDir() (string, func(*slog.Logger), error) {
 			log.Warn("clearing the scratch directory failed", "dir", dir, "error", err)
 		}
 	}, nil
+}
+
+// fetchLogo downloads the branding into the work directory, returning the local
+// path or "" for an unbranded build.
+//
+// A logo configured explicitly and then missing is fatal, matching how the
+// daemon treats its configuration: a variable that is set but unusable is an
+// error rather than a silent fallback, because the alternative is publishing
+// unbranded video for weeks and nobody noticing. Absent at the default path is
+// simply "no branding configured".
+func fetchLogo(ctx context.Context, client *gcs.Client, dir string, log *slog.Logger) (string, error) {
+	object, explicit := os.LookupEnv("TIMELAPSE_LOGO")
+	object = strings.TrimSpace(object)
+	if !explicit {
+		object = "assets/logo.png"
+	}
+	if object == "" {
+		log.Info("no logo configured; the video will be unbranded")
+		return "", nil
+	}
+	if prefix := strings.Trim(os.Getenv("GCS_PREFIX"), "/"); prefix != "" {
+		object = path.Join(prefix, object)
+	}
+
+	obj, err := client.Get(ctx, object)
+	if err != nil {
+		if gcs.IsNotFound(err) && !explicit {
+			log.Warn("no logo at the default path; the video will be unbranded", "object", object)
+			return "", nil
+		}
+		return "", fmt.Errorf("TIMELAPSE_LOGO %s: %w", object, err)
+	}
+
+	dst := filepath.Join(dir, "logo"+path.Ext(object))
+	if err := os.WriteFile(dst, obj.Data, 0o644); err != nil {
+		return "", fmt.Errorf("timelapse: writing the logo: %w", err)
+	}
+	log.Info("logo fetched", "object", object, "bytes", len(obj.Data))
+	return dst, nil
+}
+
+func envFloat(k string, def float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(k))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return def
+	}
+	return v
 }
 
 func envString(k, def string) string {

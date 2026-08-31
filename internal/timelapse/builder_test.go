@@ -94,6 +94,8 @@ type fakeEncoder struct {
 	mu      sync.Mutex
 	encodes []encodeCall
 	joins   []encodeCall
+	gifs    []string
+	gifErr  error
 	err     error
 }
 
@@ -113,6 +115,17 @@ func (e *fakeEncoder) Join(_ context.Context, segments []string, dst string) err
 	e.joins = append(e.joins, encodeCall{append([]string(nil), segments...), dst})
 	e.mu.Unlock()
 	return writeFile(dst, []byte("joined:"+strings.Join(baseNames(segments), ",")))
+}
+
+func (e *fakeEncoder) GIF(_ context.Context, src, dst string, _ GIFOptions) error {
+	e.mu.Lock()
+	e.gifs = append(e.gifs, dst)
+	err := e.gifErr
+	e.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return writeFile(dst, []byte("gif of "+filepath.Base(src)))
 }
 
 func baseNames(paths []string) []string {
@@ -297,7 +310,7 @@ func TestProductLeavesOutASegmentThatWillNotDownload(t *testing.T) {
 	if _, err := b.Ensure(context.Background(), days, 31); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if err := b.Product(context.Background(), Weekly, days[2], days, Full); err != nil {
+	if err := b.Product(context.Background(), Weekly, Full, days[2], days); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 
@@ -329,7 +342,7 @@ func TestOnlyTheVariantAProductUsesIsDownloaded(t *testing.T) {
 		}
 	}
 
-	if err := b.Product(context.Background(), Monthly, days[2], days, DaylightOnly); err != nil {
+	if err := b.Product(context.Background(), Monthly, DaylightOnly, days[2], days); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 	for _, d := range days {
@@ -493,11 +506,11 @@ func TestProductUploadsTheDatedCopyAndTheStableName(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	if err := b.Product(context.Background(), Weekly, days[2], days, Full); err != nil {
+	if err := b.Product(context.Background(), Weekly, Full, days[2], days); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 
-	dated, ok := s.put(b.Layout.Product(Weekly, days[2]))
+	dated, ok := s.put(b.Layout.Product(Weekly, Full, days[2]))
 	if !ok {
 		t.Fatal("the dated copy was never uploaded")
 	}
@@ -505,7 +518,7 @@ func TestProductUploadsTheDatedCopyAndTheStableName(t *testing.T) {
 		t.Errorf("dated cache control = %q, want it immutable — it never changes", dated.cacheControl)
 	}
 
-	latest, ok := s.put(b.Layout.Latest(Weekly))
+	latest, ok := s.put(b.Layout.Latest(Weekly, Full))
 	if !ok {
 		t.Fatal("latest-weekly was never uploaded")
 	}
@@ -530,7 +543,7 @@ func TestProductJoinsSegmentsOldestFirst(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	if err := b.Product(context.Background(), Monthly, days[3], days, DaylightOnly); err != nil {
+	if err := b.Product(context.Background(), Monthly, DaylightOnly, days[3], days); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 
@@ -567,10 +580,10 @@ func TestTheMonthlyTakesDaylightSegmentsAndTheWeeklyTakesFullOnes(t *testing.T) 
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	if err := b.Product(context.Background(), Weekly, days[1], days, Full); err != nil {
+	if err := b.Product(context.Background(), Weekly, Full, days[1], days); err != nil {
 		t.Fatalf("weekly: %v", err)
 	}
-	if err := b.Product(context.Background(), Monthly, days[1], days, DaylightOnly); err != nil {
+	if err := b.Product(context.Background(), Monthly, DaylightOnly, days[1], days); err != nil {
 		t.Fatalf("monthly: %v", err)
 	}
 
@@ -599,7 +612,7 @@ func TestProductSkipsADayWithNoSegment(t *testing.T) {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	if err := b.Product(context.Background(), Weekly, days[2], days, Full); err != nil {
+	if err := b.Product(context.Background(), Weekly, Full, days[2], days); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 	if got := len(e.joins[0].segments()); got != 2 {
@@ -627,7 +640,7 @@ func TestProductFetchesSegmentsItDidNotBuild(t *testing.T) {
 		t.Errorf("encoded %d segments, want none — they were all already built", len(e.encodes))
 	}
 
-	if err := b.Product(context.Background(), Weekly, days[6], days, Full); err != nil {
+	if err := b.Product(context.Background(), Weekly, Full, days[6], days); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 	if got := len(e.joins[0].segments()); got != 7 {
@@ -639,7 +652,7 @@ func TestProductFailsWhenNothingIsAvailableToJoin(t *testing.T) {
 	s, e := newStore(), &fakeEncoder{}
 	b := testBuilder(t, s, e)
 
-	err := b.Product(context.Background(), Monthly, date(2026, 8, 26), Window(date(2026, 8, 26), 30), DaylightOnly)
+	err := b.Product(context.Background(), Monthly, DaylightOnly, date(2026, 8, 26), Window(date(2026, 8, 26), 30))
 	if err == nil {
 		t.Fatal("building a product from nothing succeeded")
 	}
@@ -648,7 +661,7 @@ func TestProductFailsWhenNothingIsAvailableToJoin(t *testing.T) {
 	}
 }
 
-func TestDailyProductIsJustTheOneDay(t *testing.T) {
+func TestYesterdayProductIsJustTheOneDay(t *testing.T) {
 	s, e := newStore(), &fakeEncoder{}
 	b := testBuilder(t, s, e)
 	day := date(2026, 8, 26)
@@ -657,17 +670,177 @@ func TestDailyProductIsJustTheOneDay(t *testing.T) {
 	if _, err := b.Ensure(context.Background(), []time.Time{day}, 31); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if err := b.Product(context.Background(), Daily, day, Window(day, 1), Full); err != nil {
+	if err := b.Product(context.Background(), Yesterday, Full, day, Window(day, 1)); err != nil {
 		t.Fatalf("Product: %v", err)
 	}
 
 	if got := len(e.joins[0].segments()); got != 1 {
-		t.Errorf("the daily joined %d segments, want 1", got)
+		t.Errorf("the yesterday product joined %d segments, want 1", got)
 	}
-	if _, ok := s.put(b.Layout.Latest(Daily)); !ok {
-		t.Error("latest-daily was never uploaded")
+	if _, ok := s.put(b.Layout.Latest(Yesterday, Full)); !ok {
+		t.Error("latest-yesterday was never uploaded")
 	}
 }
 
 // segments is a small accessor so the join assertions read as what they check.
 func (c encodeCall) segments() []string { return c.frames }
+
+// --- today -------------------------------------------------------------------
+
+func TestTodayPublishesBothTreatmentsWithPreviews(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+	day := date(2026, 8, 27)
+	archiveDay(t, s, b.Layout, day, 5, 3)
+
+	if err := b.Today(context.Background(), day); err != nil {
+		t.Fatalf("Today: %v", err)
+	}
+
+	for _, v := range []Variant{Full, DaylightOnly} {
+		if _, ok := s.put(b.Layout.Latest(Today, v)); !ok {
+			t.Errorf("the %s video was never uploaded", v)
+		}
+		rec, ok := s.put(b.Layout.LatestGIF(Today, v))
+		if !ok {
+			t.Errorf("the %s preview was never uploaded", v)
+			continue
+		}
+		if rec.contentType != gifType {
+			t.Errorf("%s preview content type = %q, want %q", v, rec.contentType, gifType)
+		}
+	}
+}
+
+// Today is superseded forty-eight times a day and becomes the yesterday product
+// at midnight. A dated copy of it would be forty-eight near-identical objects a
+// day that nothing ever reads.
+func TestTodayWritesNoDatedCopy(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+	day := date(2026, 8, 27)
+	archiveDay(t, s, b.Layout, day, 4, 2)
+
+	if err := b.Today(context.Background(), day); err != nil {
+		t.Fatalf("Today: %v", err)
+	}
+
+	for _, v := range []Variant{Full, DaylightOnly} {
+		if _, ok := s.put(b.Layout.Product(Today, v, day)); ok {
+			t.Errorf("a dated copy of the %s today video was written", v)
+		}
+	}
+}
+
+// Today is built from frames, never from segments — the window is still growing,
+// and a segment is written once under a name that says the day is finished.
+func TestTodayBuildsFromFramesRatherThanSegments(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+	day := date(2026, 8, 27)
+	archiveDay(t, s, b.Layout, day, 4, 2)
+
+	if err := b.Today(context.Background(), day); err != nil {
+		t.Fatalf("Today: %v", err)
+	}
+
+	if len(e.joins) != 0 {
+		t.Errorf("today joined %d segments; it should encode from frames", len(e.joins))
+	}
+	for _, name := range []string{b.Layout.Segment(day, Full), b.Layout.Segment(day, DaylightOnly)} {
+		if _, ok := s.put(name); ok {
+			t.Errorf("today wrote the segment %s, which claims the day is finished", name)
+		}
+	}
+}
+
+// Every run before dawn has no colour frames. That is the ordinary state of the
+// small hours, not a failure, and the full-day video is still worth publishing.
+func TestTodayBeforeDawnStillPublishesTheFullDay(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+	day := date(2026, 8, 27)
+	archiveDay(t, s, b.Layout, day, 0, 4)
+
+	if err := b.Today(context.Background(), day); err != nil {
+		t.Fatalf("Today: %v", err)
+	}
+
+	if _, ok := s.put(b.Layout.Latest(Today, Full)); !ok {
+		t.Error("the full-day video was not published")
+	}
+	if _, ok := s.put(b.Layout.Latest(Today, DaylightOnly)); ok {
+		t.Error("a daylight video was published for a day that has had no daylight")
+	}
+}
+
+func TestTodayReportsADayWithNothingArchivedYet(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+
+	err := b.Today(context.Background(), date(2026, 8, 27))
+	if !errors.Is(err, ErrNoFrames) {
+		t.Fatalf("Today on an empty day = %v, want ErrNoFrames", err)
+	}
+}
+
+func TestTodayClearsItsFramesAfterwards(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+	day := date(2026, 8, 27)
+	archiveDay(t, s, b.Layout, day, 4, 2)
+
+	if err := b.Today(context.Background(), day); err != nil {
+		t.Fatalf("Today: %v", err)
+	}
+	if _, err := os.Stat(b.framesDir(day)); !os.IsNotExist(err) {
+		t.Errorf("today's frames are still on disk: %v", err)
+	}
+}
+
+// --- previews ----------------------------------------------------------------
+
+// The GIF is a convenience for embedding; the mp4 is the product. A preview that
+// will not render must not take the video down with it.
+func TestAFailedPreviewStillLeavesTheVideoPublished(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{gifErr: errors.New("palettegen exploded")}
+	b := testBuilder(t, s, e)
+
+	days := Window(date(2026, 8, 26), 2)
+	for _, d := range days {
+		archiveDay(t, s, b.Layout, d, 3, 1)
+	}
+	if _, err := b.Ensure(context.Background(), days, 31); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	if err := b.Product(context.Background(), Weekly, Full, days[1], days); err != nil {
+		t.Fatalf("Product: %v", err)
+	}
+	if _, ok := s.put(b.Layout.Latest(Weekly, Full)); !ok {
+		t.Error("the video was not published when its preview failed")
+	}
+	if _, ok := s.put(b.Layout.LatestGIF(Weekly, Full)); ok {
+		t.Error("a preview was uploaded even though rendering it failed")
+	}
+}
+
+func TestEveryProductGetsAPreview(t *testing.T) {
+	s, e := newStore(), &fakeEncoder{}
+	b := testBuilder(t, s, e)
+
+	days := Window(date(2026, 8, 26), 2)
+	for _, d := range days {
+		archiveDay(t, s, b.Layout, d, 3, 1)
+	}
+	if _, err := b.Ensure(context.Background(), days, 31); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := b.Product(context.Background(), Monthly, DaylightOnly, days[1], days); err != nil {
+		t.Fatalf("Product: %v", err)
+	}
+
+	if _, ok := s.put(b.Layout.LatestGIF(Monthly, DaylightOnly)); !ok {
+		t.Error("no preview beside the monthly")
+	}
+}

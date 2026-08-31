@@ -38,6 +38,7 @@ type Store interface {
 type encoder interface {
 	Encode(ctx context.Context, frames []string, dst string) error
 	Join(ctx context.Context, segments []string, dst string) error
+	GIF(ctx context.Context, src, dst string, o GIFOptions) error
 }
 
 // Cache-Control for what this package writes.
@@ -49,7 +50,12 @@ type encoder interface {
 const (
 	immutableCache = "public, max-age=31536000, immutable"
 	latestCache    = "public, max-age=600"
-	videoType      = "video/mp4"
+	// Today is rebuilt every half hour, so it is cached for a fraction of that.
+	// Ten minutes on a video that is twenty minutes stale by the time it is
+	// replaced would mean a viewer refreshing to see nothing new.
+	todayCache = "public, max-age=300"
+	videoType  = "video/mp4"
+	gifType    = "image/gif"
 )
 
 // Builder assembles segments and products for one bucket.
@@ -65,6 +71,9 @@ type Builder struct {
 
 	// Workers bounds concurrent downloads and decodes.
 	Workers int
+
+	// GIF bounds the animated previews published beside each product.
+	GIF GIFOptions
 
 	Log *slog.Logger
 }
@@ -331,8 +340,8 @@ func (b *Builder) fetchFrames(ctx context.Context, day time.Time) ([]string, err
 }
 
 // Product joins the segments for days and uploads the result under both its
-// dated name and the stable latest name.
-func (b *Builder) Product(ctx context.Context, k Kind, day time.Time, days []time.Time, v Variant) error {
+// dated name and the stable latest name, with an animated preview beside it.
+func (b *Builder) Product(ctx context.Context, k Kind, v Variant, day time.Time, days []time.Time) error {
 	segments := make([]string, 0, len(days))
 	for _, d := range days {
 		p, err := b.localSegment(ctx, d, v)
@@ -346,27 +355,124 @@ func (b *Builder) Product(ctx context.Context, k Kind, day time.Time, days []tim
 		segments = append(segments, p)
 	}
 	if len(segments) == 0 {
-		return fmt.Errorf("timelapse: no segments available for the %s", k)
+		return fmt.Errorf("timelapse: no segments available for the %s %s", v, k)
 	}
 
-	dst := filepath.Join(b.WorkDir, string(k)+".mp4")
+	dst := filepath.Join(b.WorkDir, string(k)+"-"+string(v)+".mp4")
 	if err := b.Enc.Join(ctx, segments, dst); err != nil {
 		return err
 	}
-	data, err := os.ReadFile(dst)
+
+	if err := b.publish(ctx, k, v, day, dst, immutableCache); err != nil {
+		return err
+	}
+	b.log().Info("product built",
+		"kind", string(k), "variant", string(v), "days", len(segments), "object", b.Layout.Latest(k, v))
+	return nil
+}
+
+// Today builds the day so far, straight from the frames.
+//
+// It is the one product that cannot come from segments. A segment is written
+// once under a name that says which day it is and is never revisited, which is
+// exactly wrong for a window that grows every ten minutes — so today is encoded
+// from scratch each run. That costs one day's frames per run rather than one
+// day's frames per day, which is the price of it being current.
+//
+// It also gets no dated copy. It is superseded every half hour, and by midnight
+// it has become the yesterday product anyway.
+func (b *Builder) Today(ctx context.Context, day time.Time) error {
+	frames, err := b.fetchFrames(ctx, day)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := os.RemoveAll(b.framesDir(day)); err != nil {
+			b.log().Warn("clearing the frame directory failed", "day", day.Format(DateFormat), "error", err)
+		}
+	}()
+
+	sel, err := Daylight(ctx, frames, b.workers())
+	if err != nil {
+		return err
+	}
+	daylight := sel.Frames
+	if len(daylight) == 0 {
+		// Every run before dawn is this, so it is not a warning. The night
+		// frames still make a legitimate full-day video; there is simply no
+		// daylight cut of a day that has not got light yet.
+		b.log().Info("no daylight yet today; publishing the full day only",
+			"day", day.Format(DateFormat), "frames", len(frames))
+	}
+
+	b.log().Info("building today",
+		"day", day.Format(DateFormat), "frames", len(frames), "daylight", len(daylight), "night", sel.Night)
+
+	for _, s := range []struct {
+		variant Variant
+		frames  []string
+	}{
+		{Full, frames},
+		{DaylightOnly, daylight},
+	} {
+		if len(s.frames) == 0 {
+			continue
+		}
+		dst := filepath.Join(b.WorkDir, "today-"+string(s.variant)+".mp4")
+		if err := b.Enc.Encode(ctx, s.frames, dst); err != nil {
+			return err
+		}
+		if err := b.publish(ctx, Today, s.variant, day, dst, todayCache); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// publish uploads a finished video under its stable name, its dated name where
+// it has one, and renders the animated preview beside it.
+func (b *Builder) publish(ctx context.Context, k Kind, v Variant, day time.Time, src, datedCache string) error {
+	data, err := os.ReadFile(src)
 	if err != nil {
 		return fmt.Errorf("timelapse: %w", err)
 	}
 
-	if err := b.Store.Put(ctx, b.Layout.Product(k, day), data, videoType, immutableCache); err != nil {
-		return fmt.Errorf("timelapse: uploading the %s: %w", k, err)
-	}
-	if err := b.Store.Put(ctx, b.Layout.Latest(k), data, videoType, latestCache); err != nil {
-		return fmt.Errorf("timelapse: uploading latest-%s: %w", k, err)
+	cache := latestCache
+	if k == Today {
+		cache = todayCache
 	}
 
-	b.log().Info("product built",
-		"kind", string(k), "days", len(segments), "bytes", len(data), "object", b.Layout.Product(k, day))
+	// Today has no dated copy: it would be superseded forty-eight times a day
+	// and be indistinguishable from the yesterday product by the end of it.
+	if k != Today {
+		if err := b.Store.Put(ctx, b.Layout.Product(k, v, day), data, videoType, datedCache); err != nil {
+			return fmt.Errorf("timelapse: uploading the dated %s %s: %w", v, k, err)
+		}
+	}
+	if err := b.Store.Put(ctx, b.Layout.Latest(k, v), data, videoType, cache); err != nil {
+		return fmt.Errorf("timelapse: uploading %s: %w", b.Layout.Latest(k, v), err)
+	}
+
+	// A failed preview must not lose the video that was built successfully. The
+	// GIF is a convenience for embedding; the mp4 is the product.
+	gif := src[:len(src)-len(filepath.Ext(src))] + ".gif"
+	if err := b.Enc.GIF(ctx, src, gif, b.GIF); err != nil {
+		b.log().Error("rendering the preview failed; the video is published without one",
+			"kind", string(k), "variant", string(v), "error", err)
+		return nil
+	}
+	gifData, err := os.ReadFile(gif)
+	if err != nil {
+		b.log().Error("reading the preview failed", "kind", string(k), "error", err)
+		return nil
+	}
+	if err := b.Store.Put(ctx, b.Layout.LatestGIF(k, v), gifData, gifType, cache); err != nil {
+		return fmt.Errorf("timelapse: uploading %s: %w", b.Layout.LatestGIF(k, v), err)
+	}
+
+	b.log().Info("published",
+		"kind", string(k), "variant", string(v),
+		"mp4", len(data), "gif", len(gifData), "object", b.Layout.Latest(k, v))
 	return nil
 }
 
