@@ -147,7 +147,7 @@ func TestBothCommandLinesMoveTheIndexToTheFront(t *testing.T) {
 }
 
 func TestEncodeRejectsAnEmptyFrameList(t *testing.T) {
-	err := (&Encoder{}).Encode(context.Background(), nil, filepath.Join(t.TempDir(), "out.mp4"))
+	err := (&Encoder{}).Encode(context.Background(), nil, time.Time{}, filepath.Join(t.TempDir(), "out.mp4"))
 	if err == nil {
 		t.Fatal("encoding no frames succeeded")
 	}
@@ -173,7 +173,7 @@ func TestConcatListSurvivesAQuoteInThePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	list, cleanup, err := writeConcatList([]string{frame}, dir, "frames")
+	list, cleanup, err := writeConcatList([]concatEntry{{Path: frame}}, dir, "frames")
 	if err != nil {
 		t.Fatalf("writeConcatList: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestConcatListSurvivesAQuoteInThePath(t *testing.T) {
 
 func TestConcatListIsRemovedAfterUse(t *testing.T) {
 	dir := t.TempDir()
-	list, cleanup, err := writeConcatList([]string{filepath.Join(dir, "a.jpg")}, dir, "frames")
+	list, cleanup, err := writeConcatList([]concatEntry{{Path: filepath.Join(dir, "a.jpg")}}, dir, "frames")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,11 @@ func TestConcatListHoldsOneLinePerPathInOrder(t *testing.T) {
 		filepath.Join(dir, "002425.jpg"),
 	}
 
-	list, cleanup, err := writeConcatList(paths, dir, "frames")
+	entries := make([]concatEntry, len(paths))
+	for i, p := range paths {
+		entries[i] = concatEntry{Path: p}
+	}
+	list, cleanup, err := writeConcatList(entries, dir, "frames")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,5 +363,151 @@ func TestScaledHeightIsAlwaysEven(t *testing.T) {
 func TestScaledHeightSurvivesADegenerateSource(t *testing.T) {
 	if got := scaledHeight(1280, 0, 0); got != 0 {
 		t.Errorf("scaledHeight with a zero-width source = %d, want 0", got)
+	}
+}
+
+// --- the timestamp -----------------------------------------------------------
+
+func TestFingerprintSeparatesStampedFromUnstamped(t *testing.T) {
+	plain := (&Encoder{Width: 1280, FPS: 24, CRF: 25}).Fingerprint()
+	stamped := (&Encoder{Width: 1280, FPS: 24, CRF: 25, Font: "/f.ttf"}).Fingerprint()
+	if plain == stamped {
+		t.Fatalf("stamped and unstamped share the fingerprint %q", plain)
+	}
+
+	small := (&Encoder{Font: "/f.ttf", StampHeight: 0.045}).Fingerprint()
+	large := (&Encoder{Font: "/f.ttf", StampHeight: 0.08}).Fingerprint()
+	if small == large {
+		t.Fatalf("two stamp sizes share the fingerprint %q", small)
+	}
+}
+
+// deflicker equalises luminance across neighbouring frames. Text drawn before it
+// would be dimmed and brightened along with the sky behind it.
+func TestTheStampIsDrawnAfterTheDeflicker(t *testing.T) {
+	chain := (&Encoder{Font: "/f.ttf"}).filters(720)
+
+	deflicker := strings.Index(chain, "deflicker")
+	draw := strings.Index(chain, "drawtext")
+	if deflicker < 0 || draw < 0 {
+		t.Fatalf("chain = %q, want both filters", chain)
+	}
+	if draw < deflicker {
+		t.Errorf("chain = %q, want drawtext after deflicker", chain)
+	}
+}
+
+func TestTheStampSitsInTheOppositeCornerToTheCrest(t *testing.T) {
+	chain := (&Encoder{Font: "/f.ttf", StampMargin: 0.025}).filters(720)
+
+	// Right edge, measured back by the text width, and down from the top.
+	if !strings.Contains(chain, "x=w-tw-18") {
+		t.Errorf("chain = %q, want the stamp inset from the right edge", chain)
+	}
+	if !strings.Contains(chain, "y=18") {
+		t.Errorf("chain = %q, want the stamp inset from the top", chain)
+	}
+}
+
+// This sky runs from near-white at midday to black overnight and no single text
+// colour survives both.
+func TestTheStampHasABackingBox(t *testing.T) {
+	chain := (&Encoder{Font: "/f.ttf"}).filters(720)
+	if !strings.Contains(chain, "box=1") || !strings.Contains(chain, "boxcolor=") {
+		t.Errorf("chain = %q, want a backing box", chain)
+	}
+}
+
+// The colon inside %{metadata:d} has to reach ffmpeg escaped: the filter
+// argument parser splits on colons, so a bare one ends drawtext's text argument
+// halfway through and the whole chain is rejected.
+func TestTheStampEscapesTheColonInTheMetadataReference(t *testing.T) {
+	chain := (&Encoder{Font: "/f.ttf"}).filters(720)
+
+	if !strings.Contains(chain, `%{metadata\:d}`) || !strings.Contains(chain, `%{metadata\:t}`) {
+		t.Errorf("chain = %q, want the metadata colons escaped", chain)
+	}
+	if strings.Contains(chain, "%{metadata:d}") {
+		t.Errorf("chain = %q, has an unescaped colon", chain)
+	}
+}
+
+func TestNoFontMeansNoStamp(t *testing.T) {
+	chain := (&Encoder{}).filters(720)
+	if strings.Contains(chain, "drawtext") {
+		t.Errorf("chain = %q, want no drawtext without a font", chain)
+	}
+}
+
+// The label rides with each frame, because it differs per frame and a filter
+// argument is fixed for the whole run.
+func TestTheConcatListCarriesAStampPerFrame(t *testing.T) {
+	dir := t.TempDir()
+	entries := []concatEntry{
+		{Path: filepath.Join(dir, "000425.jpg"), Date: "2026-08-26", Clock: "00:10"},
+		{Path: filepath.Join(dir, "001425.jpg"), Date: "2026-08-26", Clock: "00:20"},
+	}
+
+	list, cleanup, err := writeConcatList(entries, dir, "frames")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	body, err := os.ReadFile(list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+
+	for _, want := range []string{
+		"file_packet_metadata d=2026-08-26",
+		"file_packet_metadata t=00:10",
+		"file_packet_metadata t=00:20",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the list is missing %q:\n%s", want, got)
+		}
+	}
+	// Every metadata value has to be free of spaces; the demuxer ends the value
+	// at the first one.
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.HasPrefix(line, "file_packet_metadata ") {
+			continue
+		}
+		if strings.Count(line, " ") != 1 {
+			t.Errorf("metadata line %q has a space in its value, which would truncate it", line)
+		}
+	}
+}
+
+func TestAnUnstampedListCarriesNoMetadata(t *testing.T) {
+	dir := t.TempDir()
+	list, cleanup, err := writeConcatList([]concatEntry{{Path: filepath.Join(dir, "a.mp4")}}, dir, "segments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	body, _ := os.ReadFile(list)
+	if strings.Contains(string(body), "file_packet_metadata") {
+		t.Errorf("an unstamped list carries metadata:\n%s", body)
+	}
+}
+
+func TestEncodeRejectsAFrameItCannotLabel(t *testing.T) {
+	dir := t.TempDir()
+	// A perfectly good frame, filed under a name that says nothing about when it
+	// was taken.
+	frame := filepath.Join(dir, "not-a-time.jpg")
+	colourFrame(t, frame)
+
+	e := &Encoder{Font: "/f.ttf", FFmpeg: filepath.Join(dir, "no-ffmpeg")}
+	err := e.Encode(context.Background(), []string{frame}, time.Now(), filepath.Join(dir, "out.mp4"))
+	if err == nil {
+		t.Fatal("encoding an unlabellable frame succeeded")
+	}
+	if !strings.Contains(err.Error(), "HHMMSS") {
+		t.Errorf("error = %v, want it to name the problem with the frame name", err)
 	}
 }

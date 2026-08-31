@@ -16,6 +16,9 @@
 //	TIMELAPSE_LOGO          logo object in the bucket           (default assets/logo.png)
 //	TIMELAPSE_LOGO_HEIGHT   logo height as a fraction of frame  (default 0.34)
 //	TIMELAPSE_LOGO_MARGIN   inset as a fraction of frame height (default 0.025)
+//	TIMELAPSE_FONT          face for the timestamp; empty disables it
+//	TIMELAPSE_STAMP_HEIGHT  type size as a fraction of frame height (default 0.045)
+//	TIMELAPSE_STAMP_MARGIN  inset from the top-right corner       (default 0.025)
 //	TIMELAPSE_GIF_WIDTH     preview width in pixels             (default 480)
 //	TIMELAPSE_GIF_FPS       preview playback rate               (default 12)
 //	TIMELAPSE_GIF_FRAMES    preview frame cap                   (default 200)
@@ -171,6 +174,20 @@ func run(log *slog.Logger) error {
 		Logo:       logo,
 		LogoHeight: envFloat("TIMELAPSE_LOGO_HEIGHT", timelapse.DefaultLogoHeight),
 		LogoMargin: envFloat("TIMELAPSE_LOGO_MARGIN", timelapse.DefaultLogoMargin),
+
+		// The face ships in the image: it is OFL and committed, unlike the
+		// crest, so there is nothing to fetch and nothing to place by hand.
+		Font:        envString("TIMELAPSE_FONT", "/usr/local/share/rattlecam/font.ttf"),
+		StampHeight: envFloat("TIMELAPSE_STAMP_HEIGHT", timelapse.DefaultStampHeight),
+		StampMargin: envFloat("TIMELAPSE_STAMP_MARGIN", timelapse.DefaultStampMargin),
+	}
+
+	// A font that is configured but missing would fail every encode with an
+	// ffmpeg error a long way from the cause, so it is checked once here.
+	if enc.Font != "" {
+		if _, err := os.Stat(enc.Font); err != nil {
+			return fmt.Errorf("TIMELAPSE_FONT %s: %w", enc.Font, err)
+		}
 	}
 
 	b := &timelapse.Builder{

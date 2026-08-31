@@ -36,7 +36,7 @@ type Store interface {
 // usually would: this suite is not permitted to skip, so a test that needed a
 // binary CI might not have would have to be deleted instead.
 type encoder interface {
-	Encode(ctx context.Context, frames []string, dst string) error
+	Encode(ctx context.Context, frames []string, day time.Time, dst string) error
 	Join(ctx context.Context, segments []string, dst string) error
 	GIF(ctx context.Context, src, dst string, o GIFOptions) error
 }
@@ -246,7 +246,7 @@ func (b *Builder) buildSegments(ctx context.Context, day time.Time) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return fmt.Errorf("timelapse: %w", err)
 		}
-		if err := b.Enc.Encode(ctx, s.frames, dst); err != nil {
+		if err := b.Enc.Encode(ctx, s.frames, day, dst); err != nil {
 			return err
 		}
 		data, err := os.ReadFile(dst)
@@ -419,7 +419,7 @@ func (b *Builder) Today(ctx context.Context, day time.Time) error {
 			continue
 		}
 		dst := filepath.Join(b.WorkDir, "today-"+string(s.variant)+".mp4")
-		if err := b.Enc.Encode(ctx, s.frames, dst); err != nil {
+		if err := b.Enc.Encode(ctx, s.frames, day, dst); err != nil {
 			return err
 		}
 		if err := b.publish(ctx, Today, s.variant, day, dst, todayCache); err != nil {
