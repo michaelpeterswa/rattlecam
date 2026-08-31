@@ -2,6 +2,7 @@ package timelapse
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,8 +42,8 @@ func TestPrefixAppliesToEveryName(t *testing.T) {
 	for name, got := range map[string]string{
 		"archive":  l.ArchiveDay(day),
 		"segment":  l.Segment(day, Full),
-		"product":  l.Product(Weekly, day),
-		"latest":   l.Latest(Monthly),
+		"product":  l.Product(Weekly, Full, day),
+		"latest":   l.Latest(Monthly, DaylightOnly),
 		"segments": l.SegmentPrefix(),
 	} {
 		if len(got) < 12 || got[:12] != "rattlesnake/" {
@@ -133,5 +134,87 @@ func TestDayStartsAtMidnightInZonesOffsetByHalfAnHour(t *testing.T) {
 	}
 	if got.Format(DateFormat) != "2026-08-26" {
 		t.Errorf("Day landed on %s, want 2026-08-26", got.Format(DateFormat))
+	}
+}
+
+// --- naming across variants --------------------------------------------------
+
+// The unsuffixed name is the one a page will reach for, so it has to be the
+// treatment you would actually want for that period: the whole of a day, the
+// daylight of a month.
+func TestTheUnsuffixedNameCarriesTheUsefulDefault(t *testing.T) {
+	l := Layout{}
+
+	for kind, want := range map[Kind]Variant{
+		Today:     Full,
+		Yesterday: Full,
+		Weekly:    Full,
+		Monthly:   DaylightOnly,
+	} {
+		if got := DefaultVariant(kind); got != want {
+			t.Errorf("DefaultVariant(%s) = %s, want %s", kind, got, want)
+		}
+		if got := l.Latest(kind, want); got != "timelapse/latest-"+string(kind)+".mp4" {
+			t.Errorf("the default %s is published as %q, want it unsuffixed", kind, got)
+		}
+	}
+}
+
+func TestTheAlternativeTreatmentIsSuffixed(t *testing.T) {
+	l := Layout{}
+
+	if got, want := l.Latest(Today, DaylightOnly), "timelapse/latest-today-daylight.mp4"; got != want {
+		t.Errorf("Latest = %q, want %q", got, want)
+	}
+	// The monthly's alternative is the full day, so that is the suffixed one.
+	if got, want := l.Latest(Monthly, Full), "timelapse/latest-monthly-full.mp4"; got != want {
+		t.Errorf("Latest = %q, want %q", got, want)
+	}
+}
+
+func TestEveryProductNameIsDistinct(t *testing.T) {
+	l := Layout{}
+	seen := map[string]string{}
+
+	for _, k := range Kinds {
+		for _, v := range []Variant{Full, DaylightOnly} {
+			for label, name := range map[string]string{
+				"mp4": l.Latest(k, v),
+				"gif": l.LatestGIF(k, v),
+			} {
+				if prev, ok := seen[name]; ok {
+					t.Errorf("%s %s %s collides with %s at %q", k, v, label, prev, name)
+				}
+				seen[name] = string(k) + " " + string(v) + " " + label
+			}
+		}
+	}
+}
+
+func TestThePreviewSitsBesideTheVideoItPreviews(t *testing.T) {
+	l := Layout{}
+	for _, k := range Kinds {
+		mp4 := l.Latest(k, DefaultVariant(k))
+		gif := l.LatestGIF(k, DefaultVariant(k))
+		if strings.TrimSuffix(mp4, ".mp4") != strings.TrimSuffix(gif, ".gif") {
+			t.Errorf("%s: %q and %q are not the same name with different extensions", k, mp4, gif)
+		}
+	}
+}
+
+// The dated copies live under prefixes the bucket's lifecycle rule expires, so
+// the variant has to sit in the filename rather than in the path — a
+// timelapse/weekly-daylight/ prefix would not be matched by the rule and would
+// accumulate forever.
+func TestDatedCopiesKeepTheVariantInTheFilename(t *testing.T) {
+	l := Layout{}
+	day := time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)
+
+	got := l.Product(Weekly, DaylightOnly, day)
+	if want := "timelapse/weekly/2026-08-26-daylight.mp4"; got != want {
+		t.Errorf("Product = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, "timelapse/weekly/") {
+		t.Errorf("Product = %q, which the lifecycle rule on timelapse/weekly/ would not match", got)
 	}
 }

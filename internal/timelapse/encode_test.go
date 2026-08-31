@@ -49,7 +49,7 @@ func TestFingerprintUsesDefaultsForUnsetFields(t *testing.T) {
 // the failure is a corrupt month rather than an error.
 func TestEncodeArgsPinTheSettingsAJoinDependsOn(t *testing.T) {
 	e := &Encoder{FPS: 24, Width: 1280, CRF: 25}
-	args := e.encodeArgs("list.txt", "out.mp4")
+	args := e.encodeArgs("list.txt", "out.mp4", 0)
 
 	for flag, want := range map[string]string{
 		"-g":            "48",
@@ -73,7 +73,7 @@ func TestEncodeArgsPinTheSettingsAJoinDependsOn(t *testing.T) {
 // the concat demuxer how long to hold each still, the second sets the output
 // rate. With only the second, ffmpeg assumes 25 and drops or repeats frames.
 func TestEncodeArgsSetTheFrameRateOnBothSidesOfTheInput(t *testing.T) {
-	args := (&Encoder{FPS: 24}).encodeArgs("list.txt", "out.mp4")
+	args := (&Encoder{FPS: 24}).encodeArgs("list.txt", "out.mp4", 0)
 
 	input := -1
 	var before, after bool
@@ -96,7 +96,7 @@ func TestEncodeArgsSetTheFrameRateOnBothSidesOfTheInput(t *testing.T) {
 }
 
 func TestEncodeArgsScaleToTheConfiguredWidth(t *testing.T) {
-	filters, ok := argValue((&Encoder{Width: 1920}).encodeArgs("l", "o"), "-vf")
+	filters, ok := argValue((&Encoder{Width: 1920}).encodeArgs("l", "o", 0), "-vf")
 	if !ok {
 		t.Fatal("no filter chain")
 	}
@@ -112,7 +112,7 @@ func TestEncodeArgsScaleToTheConfiguredWidth(t *testing.T) {
 // The camera meters every frame independently ten minutes apart, so without
 // this the result strobes.
 func TestEncodeArgsDeflicker(t *testing.T) {
-	filters, _ := argValue((&Encoder{}).encodeArgs("l", "o"), "-vf")
+	filters, _ := argValue((&Encoder{}).encodeArgs("l", "o", 0), "-vf")
 	if !strings.Contains(filters, "deflicker") {
 		t.Errorf("filters = %q, want deflicker", filters)
 	}
@@ -137,7 +137,7 @@ func TestJoinArgsCopyRatherThanReEncode(t *testing.T) {
 // the monthly that is the difference between immediate and ninety megabytes.
 func TestBothCommandLinesMoveTheIndexToTheFront(t *testing.T) {
 	for name, args := range map[string][]string{
-		"encode": (&Encoder{}).encodeArgs("l", "o"),
+		"encode": (&Encoder{}).encodeArgs("l", "o", 0),
 		"join":   joinArgs("l", "o"),
 	} {
 		if got, _ := argValue(args, "-movflags"); got != "+faststart" {
@@ -250,5 +250,114 @@ func TestLastLinesKeepsTheTail(t *testing.T) {
 	}
 	if strings.Contains(got, "banner\nmore") {
 		t.Errorf("lastLines = %q, want only the tail", got)
+	}
+}
+
+// --- branding ---------------------------------------------------------------
+
+// The logo is burned into the segment, so a branded segment and an unbranded one
+// are not interchangeable even though every codec setting matches. Without this
+// in the fingerprint, turning branding on would leave a month stitched from a
+// mixture of the two, with the crest flickering in and out across day
+// boundaries.
+func TestFingerprintSeparatesBrandedFromUnbranded(t *testing.T) {
+	plain := (&Encoder{Width: 1280, FPS: 24, CRF: 25}).Fingerprint()
+	branded := (&Encoder{Width: 1280, FPS: 24, CRF: 25, Logo: "/tmp/logo.png"}).Fingerprint()
+
+	if plain == branded {
+		t.Fatalf("branded and unbranded share the fingerprint %q", plain)
+	}
+}
+
+// Resizing the crest changes the pictures, so it has to invalidate them too.
+func TestFingerprintTracksTheLogoSize(t *testing.T) {
+	a := (&Encoder{Logo: "/tmp/logo.png", LogoHeight: 0.34}).Fingerprint()
+	b := (&Encoder{Logo: "/tmp/logo.png", LogoHeight: 0.20}).Fingerprint()
+
+	if a == b {
+		t.Fatalf("two logo heights share the fingerprint %q", a)
+	}
+}
+
+func TestUnbrandedEncodeUsesAPlainFilterChain(t *testing.T) {
+	args := (&Encoder{}).encodeArgs("list.txt", "out.mp4", 0)
+
+	if _, ok := argValue(args, "-vf"); !ok {
+		t.Error("no -vf; an unbranded encode needs no filter_complex")
+	}
+	if _, ok := argValue(args, "-filter_complex"); ok {
+		t.Error("-filter_complex on an unbranded encode")
+	}
+}
+
+// A second input cannot be composited through -vf, so branding has to switch the
+// chain to filter_complex and map its output explicitly.
+func TestBrandedEncodeCompositesTheLogoTopLeft(t *testing.T) {
+	e := &Encoder{Width: 1280, Logo: "/tmp/logo.png", LogoHeight: 0.34, LogoMargin: 0.025}
+	args := e.encodeArgs("list.txt", "out.mp4", 720)
+
+	chain, ok := argValue(args, "-filter_complex")
+	if !ok {
+		t.Fatal("no -filter_complex on a branded encode")
+	}
+	if _, plain := argValue(args, "-vf"); plain {
+		t.Error("-vf alongside -filter_complex")
+	}
+	if got, _ := argValue(args, "-map"); got != "[out]" {
+		t.Errorf("-map = %q, want [out]", got)
+	}
+
+	// 34% of 720 is 245, inset by 2.5% of 720, which is 18.
+	if !strings.Contains(chain, "scale=-1:245") {
+		t.Errorf("chain = %q, want the logo scaled to 245px tall", chain)
+	}
+	if !strings.Contains(chain, "overlay=18:18") {
+		t.Errorf("chain = %q, want the logo inset 18px from the top left", chain)
+	}
+	// -1 preserves the crest's own aspect; a fixed width would squash it.
+	if strings.Contains(chain, "scale=0:245") {
+		t.Errorf("chain = %q, want the logo width left to the aspect ratio", chain)
+	}
+}
+
+func TestBrandedEncodeStillFeedsTheLogoAsASecondInput(t *testing.T) {
+	args := (&Encoder{Logo: "/tmp/crest.png"}).encodeArgs("list.txt", "out.mp4", 720)
+
+	var inputs int
+	for i, a := range args {
+		if a == "-i" && i+1 < len(args) {
+			inputs++
+		}
+	}
+	if inputs != 2 {
+		t.Errorf("got %d inputs, want the frame list and the logo", inputs)
+	}
+}
+
+// yuv420p cannot encode an odd height, so the scale has to land on an even one —
+// and the logo size is derived from that height, so getting it wrong misplaces
+// the branding as well as breaking the encode.
+func TestScaledHeightIsAlwaysEven(t *testing.T) {
+	for _, tc := range []struct {
+		w, sw, sh, want int
+	}{
+		{1280, 3840, 2160, 720},
+		{480, 3840, 2160, 270},
+		{1280, 1920, 1080, 720},
+		{333, 3840, 2160, 186}, // 187.3 rounds to 187, then down to 186
+	} {
+		got := scaledHeight(tc.w, tc.sw, tc.sh)
+		if got != tc.want {
+			t.Errorf("scaledHeight(%d, %d, %d) = %d, want %d", tc.w, tc.sw, tc.sh, got, tc.want)
+		}
+		if got%2 != 0 {
+			t.Errorf("scaledHeight(%d, %d, %d) = %d, which is odd", tc.w, tc.sw, tc.sh, got)
+		}
+	}
+}
+
+func TestScaledHeightSurvivesADegenerateSource(t *testing.T) {
+	if got := scaledHeight(1280, 0, 0); got != 0 {
+		t.Errorf("scaledHeight with a zero-width source = %d, want 0", got)
 	}
 }

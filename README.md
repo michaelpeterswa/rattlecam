@@ -396,15 +396,42 @@ cache". Sixty seconds matches the publish cadence — polling faster only buys 3
 `cmd/timelapse` builds three videos a night from the archive, and puts them in
 the bucket next to the frames.
 
-| Object | Window | Frames | Runs for |
-| --- | --- | --- | --- |
-| `timelapse/latest-daily.mp4` | yesterday | ~142 | 6s |
-| `timelapse/latest-weekly.mp4` | last 7 days | ~1,000 | 41s |
-| `timelapse/latest-monthly.mp4` | last 30 days, daylight only | ~2,700 | 1:52 |
+| Object | Window | Frames | Runs for | Rebuilt |
+| --- | --- | --- | --- | --- |
+| `timelapse/latest-today.mp4` | midnight until now | grows to ~142 | up to 6s | every 30 min |
+| `timelapse/latest-yesterday.mp4` | the last complete day | ~142 | 6s | nightly |
+| `timelapse/latest-weekly.mp4` | last 7 days | ~1,000 | 41s | nightly |
+| `timelapse/latest-monthly.mp4` | last 30 days | ~2,700 | 1:52 | nightly |
 
-Each is also written under a dated name — `timelapse/monthly/2026-08-26.mp4` —
-which never changes once written and caches for a year, while the `latest-*`
-names are rewritten nightly and cache for ten minutes.
+Each has an animated preview beside it — `latest-weekly.gif` — and each except
+today is also written under a dated name, `timelapse/weekly/2026-08-26.mp4`,
+which never changes once written and caches for a year.
+
+### Night included, or not
+
+Every product except the monthly is published both ways. **The unsuffixed name
+carries the treatment you would actually want for that period**, and `-daylight`
+names the alternative:
+
+| | unsuffixed | also published |
+| --- | --- | --- |
+| `today`, `yesterday`, `weekly` | night included | `-daylight` |
+| `monthly` | daylight only | — |
+
+The default differs by period on purpose. Over a day you want the whole day: the
+dark hours are a few seconds and the transitions through them are the good part.
+Over a month you do not — the same black rectangle recurs for a third of the
+running time, forty minutes of it, and nobody watches a month to see thirty
+nights. A night-included month would also be 150 MB, so it is not published.
+
+### Today is the one that cannot be cached
+
+Everything else is stitched from segments. Today cannot be: a segment is written
+once under a name that says which day it is and is never revisited, which is
+exactly wrong for a window that grows every ten minutes. So today is encoded from
+its frames on every run — one day's frames per run rather than per day, which is
+the price of it being current — and gets no dated copy, because it is superseded
+forty-eight times a day and has become the yesterday product by midnight.
 
 It does not run on the tower. A month of masters is a couple of gigabytes to
 read, the uplink has already carried every one of those frames once, and reading
@@ -449,6 +476,43 @@ time and only about 14% off the bytes, because a black frame compresses to
 almost nothing while a daylit ridge does not. What it removes is forty minutes
 of identical dark rectangle from a video meant to show a season moving.
 
+### Branding
+
+The RSVU crest is composited into the top-left corner at `TIMELAPSE_LOGO_HEIGHT`
+of the frame height, defaulting to the same `logo_height` and `logo_margin` the
+theme uses — a viewer moving between the live frame and a timelapse should not
+have to find the branding twice.
+
+It is burned into the **segments**, not the finished products, which is what
+keeps the weekly and the monthly as stream copies. The cost is that changing the
+branding invalidates every segment, and that is handled the same way every other
+setting change is: the logo is part of the fingerprint, so turning it on builds a
+fresh set rather than stitching a month from a mixture of branded and unbranded
+days with the crest flickering in and out at each day boundary.
+
+The artwork is fetched from the bucket rather than baked into the image, for the
+same reason the daemon reads its assets from disk: the logo is the agency's and
+is not in the repository, so an image built by CI cannot contain it. Put it at
+`assets/logo.png` in the bucket. Absent at that default path means "unbranded";
+set `TIMELAPSE_LOGO` explicitly and it is a startup error if missing, because the
+alternative is publishing unbranded video for weeks and nobody noticing.
+
+### Previews for embedding
+
+Each product gets a GIF, sized for dropping into a page as a plain `<img>`.
+
+GIF has no interframe prediction worth the name, so **file size is set by the
+frame count and almost nothing else** — which is why `TIMELAPSE_GIF_FRAMES` caps
+it at 200 and the longer products are decimated to fit. A useful consequence: a
+GIF is roughly the same size whatever window it covers, because it always holds
+about the same number of pictures. A month becomes a fast flip through the month
+rather than a faithful rendition of the video, which is the right trade for
+something whose job is to catch the eye above the fold.
+
+Measured at the defaults — 480 wide, 12 fps, 200 frames — they run 5 to 9 MB. A
+GIF of the weekly is therefore *smaller* than the mp4 it previews, and a GIF of
+today is larger; that is the frame cap doing its work at both ends.
+
 ### Size is set by frame count, not duration
 
 At ten-minute spacing consecutive frames share almost nothing, so x264 has no
@@ -473,7 +537,18 @@ TIMELAPSE_MONTH_DAYS    days in the monthly                 (default 30)
 TIMELAPSE_BUILD_BUDGET  segments one run may encode         (default 31)
 TIMELAPSE_WORKERS       concurrent downloads and decodes    (default 8)
 TIMELAPSE_WORKDIR       scratch space                       (default a temp directory)
+TIMELAPSE_MODE          nightly | today                     (default nightly)
+TIMELAPSE_LOGO          logo object in the bucket           (default assets/logo.png)
+TIMELAPSE_LOGO_HEIGHT   fraction of frame height            (default 0.34, matching theme.json)
+TIMELAPSE_LOGO_MARGIN   inset, fraction of frame height     (default 0.025)
+TIMELAPSE_GIF_WIDTH     preview width in pixels             (default 480)
+TIMELAPSE_GIF_FPS       preview playback rate               (default 12)
+TIMELAPSE_GIF_FRAMES    preview frame cap                   (default 200)
 ```
+
+`-mode today` rebuilds only the today products, from today's frames. It is
+scheduled every thirty minutes; the nightly build runs `-mode nightly` and does
+everything else.
 
 `TZ` has to match the daemon's. The archive's day directories are named in the
 site's local zone by whichever process wrote them, so a job resolving dates in
@@ -510,14 +585,23 @@ is what keeps this from being a way to walk the bucket.
 
 ```
 /latest.jpg  /latest-clean.jpg  /latest-web.jpg
-/latest-daily.mp4  /latest-weekly.mp4  /latest-monthly.mp4
+
+/latest-today.mp4      /latest-today-daylight.mp4
+/latest-yesterday.mp4  /latest-yesterday-daylight.mp4
+/latest-weekly.mp4     /latest-weekly-daylight.mp4
+/latest-monthly.mp4
 ```
 
+...and a `.gif` beside each of those seven. The routes are generated from the
+same `timelapse.Layout` and the same `timelapse.Variants` matrix the job
+publishes with, so the gateway cannot come to serve a set of objects that differs
+from the set that exists.
+
 The videos are held in memory like everything else here, and they are much larger
-than a frame — a month runs to something like 130 MB. That is the same trade the
-frames make, read once a night rather than once per viewer, but it is real
-memory: budget a few hundred megabytes, or set `TIMELAPSE_SERVE=false` on a host
-that has not got it. They are served through `http.ServeContent`, so a `<video>`
+than a frame — the monthly alone runs to about 90 MB, and the full set is roughly
+200 MB. That is the same trade the frames make, read once per build rather than
+once per viewer, but it is real memory: the gateway needs a host with room for
+it, or `TIMELAPSE_SERVE=false` on one without. They are served through `http.ServeContent`, so a `<video>`
 element can seek — a scrubber needs `Range`, and a server that answers every
 request with the whole file has one that does not scrub.
 

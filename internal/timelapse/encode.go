@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image/jpeg"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,26 @@ type Encoder struct {
 	// Preset trades encoding time for compression efficiency.
 	Preset string
 
+	// Logo is a local image composited into the top-left corner. Empty leaves
+	// the video unbranded.
+	//
+	// It is burned into the segments rather than into the finished products,
+	// which is what keeps the weekly and the monthly as stream copies. The cost
+	// is that changing the branding invalidates every segment — handled, because
+	// the logo is part of the fingerprint.
+	Logo string
+
+	// LogoHeight and LogoMargin are fractions of the output height, matching
+	// theme.json's logo_height and logo_margin so a timelapse is branded the
+	// same way as the still frames it is made of.
+	LogoHeight float64
+	LogoMargin float64
+
+	// FFprobe reads the duration of a finished product, which is how the GIF
+	// pass knows how hard to decimate. Empty means "ffprobe", found on PATH
+	// beside ffmpeg.
+	FFprobe string
+
 	// Timeout bounds a single ffmpeg run. A month is a few thousand frames and
 	// takes minutes; a hung encoder must not hold a scheduled job open forever.
 	Timeout time.Duration
@@ -59,6 +80,11 @@ const (
 	DefaultCRF     = 25
 	DefaultPreset  = "slow"
 	DefaultTimeout = 30 * time.Minute
+
+	// Matching theme.json, so the crest sits where a viewer already expects it
+	// from the live frame.
+	DefaultLogoHeight = 0.34
+	DefaultLogoMargin = 0.025
 )
 
 func (e *Encoder) ffmpeg() string {
@@ -96,6 +122,27 @@ func (e *Encoder) preset() string {
 	return e.Preset
 }
 
+func (e *Encoder) ffprobe() string {
+	if e.FFprobe == "" {
+		return "ffprobe"
+	}
+	return e.FFprobe
+}
+
+func (e *Encoder) logoHeight() float64 {
+	if e.LogoHeight <= 0 || e.LogoHeight > 1 {
+		return DefaultLogoHeight
+	}
+	return e.LogoHeight
+}
+
+func (e *Encoder) logoMargin() float64 {
+	if e.LogoMargin < 0 || e.LogoMargin > 1 {
+		return DefaultLogoMargin
+	}
+	return e.LogoMargin
+}
+
 func (e *Encoder) timeout() time.Duration {
 	if e.Timeout <= 0 {
 		return DefaultTimeout
@@ -114,7 +161,15 @@ func (e *Encoder) timeout() time.Duration {
 // the old ones: it builds a fresh set under a new name, and the stale ones age
 // out with the bucket's lifecycle rules instead of silently corrupting a month.
 func (e *Encoder) Fingerprint() string {
-	return fmt.Sprintf("%dw-%dfps-crf%d", e.width(), e.fps(), e.crf())
+	fp := fmt.Sprintf("%dw-%dfps-crf%d", e.width(), e.fps(), e.crf())
+	// The branding is burned in, so an unbranded segment and a branded one are
+	// not interchangeable even though every codec setting matches. Without this
+	// in the name, turning the logo on would leave a month stitched from a
+	// mixture of the two.
+	if e.Logo != "" {
+		fp += fmt.Sprintf("-logo%d", int(e.logoHeight()*100+0.5))
+	}
+	return fp
 }
 
 // Encode writes frames to dst as an H.264 mp4.
@@ -128,13 +183,56 @@ func (e *Encoder) Encode(ctx context.Context, frames []string, dst string) error
 		return fmt.Errorf("timelapse: no frames to encode into %s", filepath.Base(dst))
 	}
 
+	// The logo is sized as a fraction of the output height, so the output height
+	// has to be known before the filter chain is built. It comes from the first
+	// frame's JPEG header rather than from ffprobe or an assumed 16:9: reading
+	// the header is a few hundred bytes and no decode, and assuming the aspect
+	// would put the crest at the wrong size the day the camera is replaced.
+	outHeight := 0
+	if e.Logo != "" {
+		w, h, err := jpegBounds(frames[0])
+		if err != nil {
+			return err
+		}
+		outHeight = scaledHeight(e.width(), w, h)
+	}
+
 	list, cleanup, err := writeConcatList(frames, filepath.Dir(dst), "frames")
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	return e.run(ctx, e.encodeArgs(list, dst))
+	return e.run(ctx, e.encodeArgs(list, dst, outHeight))
+}
+
+// jpegBounds reads an image's dimensions from its header.
+func jpegBounds(path string) (w, h int, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("timelapse: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only
+
+	cfg, err := jpeg.DecodeConfig(f)
+	if err != nil {
+		return 0, 0, fmt.Errorf("timelapse: reading the frame size from %s: %w", filepath.Base(path), err)
+	}
+	return cfg.Width, cfg.Height, nil
+}
+
+// scaledHeight is what scale=width:-2 will produce: the aspect preserved and
+// rounded to an even number, which yuv420p requires.
+func scaledHeight(outWidth, srcWidth, srcHeight int) int {
+	if srcWidth <= 0 {
+		return 0
+	}
+	h := int(float64(srcHeight)*float64(outWidth)/float64(srcWidth) + 0.5)
+	h -= h % 2
+	if h < 2 {
+		h = 2
+	}
+	return h
 }
 
 // Join concatenates segments into dst without re-encoding.
@@ -156,7 +254,7 @@ func (e *Encoder) Join(ctx context.Context, segments []string, dst string) error
 //
 // Kept separate from running it so the arguments can be tested without ffmpeg
 // installed, which matters because the suite is not allowed to skip.
-func (e *Encoder) encodeArgs(list, dst string) []string {
+func (e *Encoder) encodeArgs(list, dst string, outHeight int) []string {
 	// Two seconds of pictures between keyframes, with scene detection off.
 	//
 	// Both settings are here for the join. Segments can only be copied into one
@@ -168,14 +266,28 @@ func (e *Encoder) encodeArgs(list, dst string) []string {
 	// one day to the next.
 	gop := strconv.Itoa(2 * e.fps())
 
-	return []string{
+	args := []string{
 		"-y",
 		"-loglevel", "warning",
 		"-r", strconv.Itoa(e.fps()),
 		"-f", "concat",
 		"-safe", "0",
 		"-i", list,
-		"-vf", e.filters(),
+	}
+
+	// Without a logo the chain is a plain -vf. With one there is a second input
+	// to composite, which -vf cannot express.
+	if e.Logo == "" {
+		args = append(args, "-vf", e.filters())
+	} else {
+		args = append(args,
+			"-i", e.Logo,
+			"-filter_complex", e.filterComplex(outHeight),
+			"-map", "[out]",
+		)
+	}
+
+	args = append(args,
 		"-c:v", "libx264",
 		"-crf", strconv.Itoa(e.crf()),
 		"-preset", e.preset(),
@@ -192,7 +304,29 @@ func (e *Encoder) encodeArgs(list, dst string) []string {
 		"-an",
 		"-r", strconv.Itoa(e.fps()),
 		dst,
+	)
+	return args
+}
+
+// filterComplex is the filter chain when there is a logo to composite.
+//
+// The crest is scaled to a fraction of the output height and pinned to the
+// top-left corner, which is where theme.json already puts it on the live frame —
+// a viewer moving between the still and the timelapse should not have to find
+// the branding twice.
+func (e *Encoder) filterComplex(outHeight int) string {
+	logoH := int(float64(outHeight)*e.logoHeight() + 0.5)
+	if logoH < 1 {
+		logoH = 1
 	}
+	margin := int(float64(outHeight)*e.logoMargin() + 0.5)
+
+	return strings.Join([]string{
+		"[0:v]" + e.filters() + "[base]",
+		// -1 keeps the crest's own aspect, whatever shape the artwork is.
+		fmt.Sprintf("[1:v]scale=-1:%d:flags=lanczos[logo]", logoH),
+		fmt.Sprintf("[base][logo]overlay=%d:%d:format=auto,format=yuv420p[out]", margin, margin),
+	}, ";")
 }
 
 // filters is the video filter chain.

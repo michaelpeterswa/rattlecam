@@ -32,6 +32,7 @@ import (
 
 	"github.com/michaelpeterswa/rattlecam/internal/gateway"
 	"github.com/michaelpeterswa/rattlecam/internal/gcs"
+	"github.com/michaelpeterswa/rattlecam/internal/timelapse"
 )
 
 func main() {
@@ -116,30 +117,40 @@ func run(log *slog.Logger) error {
 		"/latest-web.jpg":   {Object: key("latest-web.jpg")},
 	}
 
-	// The timelapses, on the same terms: three fixed paths, not a listing of the
-	// dated ones, so this stays a set of names rather than a way to walk the
-	// bucket.
+	// The timelapses, on the same terms: fixed paths, not a listing of the dated
+	// ones, so this stays a set of names rather than a way to walk the bucket.
+	//
+	// The names come from the same layout the job publishes with, and the same
+	// variant matrix, so the gateway cannot come to serve a set of objects that
+	// differs from the set that exists.
 	//
 	// They are held in memory like everything else here, and they are much
-	// larger than a frame — a month runs to a hundred megabytes or so. That is
-	// the cost of the same trade the frames make: read once per night rather
-	// than once per viewer. Set TIMELAPSE_SERVE=false on a host where that
-	// memory is not available.
+	// larger than a frame — the monthly alone runs to ninety megabytes or so.
+	// That is the cost of the same trade the frames make: read once per build
+	// rather than once per viewer. Set TIMELAPSE_SERVE=false on a host where
+	// that memory is not available.
 	if envBool("TIMELAPSE_SERVE", true) {
-		// A day old at worst, so unlike a frame they are worth caching — but
-		// only for minutes, because the stable name is rewritten every night.
-		const videoCache = "public, max-age=600"
-		for route, object := range map[string]string{
-			"/latest-daily.mp4":   "timelapse/latest-daily.mp4",
-			"/latest-weekly.mp4":  "timelapse/latest-weekly.mp4",
-			"/latest-monthly.mp4": "timelapse/latest-monthly.mp4",
-		} {
-			objects[route] = gateway.Served{
-				Object:       key(object),
-				CacheControl: videoCache,
-				// Absent until the nightly job has run once, which is not a
-				// fault worth a warning every ten seconds.
-				Optional: true,
+		layout := timelapse.Layout{Prefix: prefix}
+		for _, kind := range timelapse.Kinds {
+			for _, variant := range timelapse.Variants(kind) {
+				// Today is rebuilt every half hour and everything else once a
+				// night, so they cannot share a freshness.
+				cache := "public, max-age=600"
+				if kind == timelapse.Today {
+					cache = "public, max-age=300"
+				}
+				for _, object := range []string{
+					layout.Latest(kind, variant),
+					layout.LatestGIF(kind, variant),
+				} {
+					objects["/"+path.Base(object)] = gateway.Served{
+						Object:       object,
+						CacheControl: cache,
+						// Absent until the relevant job has run once, which is
+						// not a fault worth a warning every ten seconds.
+						Optional: true,
+					}
+				}
 			}
 		}
 	}
