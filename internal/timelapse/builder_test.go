@@ -99,7 +99,7 @@ type fakeEncoder struct {
 	err     error
 }
 
-func (e *fakeEncoder) Encode(_ context.Context, frames []string, dst string) error {
+func (e *fakeEncoder) Encode(_ context.Context, frames []string, _ time.Time, dst string) error {
 	e.mu.Lock()
 	e.encodes = append(e.encodes, encodeCall{append([]string(nil), frames...), dst})
 	err := e.err

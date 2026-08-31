@@ -60,6 +60,16 @@ type Encoder struct {
 	LogoHeight float64
 	LogoMargin float64
 
+	// Font is the TrueType face the timestamp is drawn in. Empty leaves the
+	// frames unstamped.
+	Font string
+
+	// StampHeight is the type size as a fraction of the output height, and
+	// StampMargin its inset from the top-right corner — mirroring the crest in
+	// the opposite corner.
+	StampHeight float64
+	StampMargin float64
+
 	// FFprobe reads the duration of a finished product, which is how the GIF
 	// pass knows how hard to decimate. Empty means "ffprobe", found on PATH
 	// beside ffmpeg.
@@ -85,6 +95,11 @@ const (
 	// from the live frame.
 	DefaultLogoHeight = 0.34
 	DefaultLogoMargin = 0.025
+
+	// Large enough to read on a phone at 480 px wide, which is the narrowest the
+	// GIFs are rendered at.
+	DefaultStampHeight = 0.045
+	DefaultStampMargin = 0.025
 )
 
 func (e *Encoder) ffmpeg() string {
@@ -136,6 +151,20 @@ func (e *Encoder) logoHeight() float64 {
 	return e.LogoHeight
 }
 
+func (e *Encoder) stampHeight() float64 {
+	if e.StampHeight <= 0 || e.StampHeight > 1 {
+		return DefaultStampHeight
+	}
+	return e.StampHeight
+}
+
+func (e *Encoder) stampMargin() float64 {
+	if e.StampMargin < 0 || e.StampMargin > 1 {
+		return DefaultStampMargin
+	}
+	return e.StampMargin
+}
+
 func (e *Encoder) logoMargin() float64 {
 	if e.LogoMargin < 0 || e.LogoMargin > 1 {
 		return DefaultLogoMargin
@@ -169,6 +198,11 @@ func (e *Encoder) Fingerprint() string {
 	if e.Logo != "" {
 		fp += fmt.Sprintf("-logo%d", int(e.logoHeight()*100+0.5))
 	}
+	// A stamped segment and an unstamped one are not interchangeable either, and
+	// the size changes the pixels as surely as the presence does.
+	if e.Font != "" {
+		fp += fmt.Sprintf("-ts%d", int(e.stampHeight()*1000+0.5))
+	}
 	return fp
 }
 
@@ -178,7 +212,7 @@ func (e *Encoder) Fingerprint() string {
 // numbered pattern, because archived names are wall-clock times with gaps in
 // them — a pattern would need them renamed into a contiguous sequence first,
 // which means copying several gigabytes to no purpose.
-func (e *Encoder) Encode(ctx context.Context, frames []string, dst string) error {
+func (e *Encoder) Encode(ctx context.Context, frames []string, day time.Time, dst string) error {
 	if len(frames) == 0 {
 		return fmt.Errorf("timelapse: no frames to encode into %s", filepath.Base(dst))
 	}
@@ -189,7 +223,7 @@ func (e *Encoder) Encode(ctx context.Context, frames []string, dst string) error
 	// the header is a few hundred bytes and no decode, and assuming the aspect
 	// would put the crest at the wrong size the day the camera is replaced.
 	outHeight := 0
-	if e.Logo != "" {
+	if e.Logo != "" || e.Font != "" {
 		w, h, err := jpegBounds(frames[0])
 		if err != nil {
 			return err
@@ -197,7 +231,20 @@ func (e *Encoder) Encode(ctx context.Context, frames []string, dst string) error
 		outHeight = scaledHeight(e.width(), w, h)
 	}
 
-	list, cleanup, err := writeConcatList(frames, filepath.Dir(dst), "frames")
+	entries := make([]concatEntry, len(frames))
+	for i, f := range frames {
+		entries[i] = concatEntry{Path: f}
+		if e.Font == "" {
+			continue
+		}
+		date, clock, err := stampFor(day, f)
+		if err != nil {
+			return err
+		}
+		entries[i].Date, entries[i].Clock = date, clock
+	}
+
+	list, cleanup, err := writeConcatList(entries, filepath.Dir(dst), "frames")
 	if err != nil {
 		return err
 	}
@@ -241,7 +288,12 @@ func (e *Encoder) Join(ctx context.Context, segments []string, dst string) error
 		return fmt.Errorf("timelapse: no segments to join into %s", filepath.Base(dst))
 	}
 
-	list, cleanup, err := writeConcatList(segments, filepath.Dir(dst), "segments")
+	entries := make([]concatEntry, len(segments))
+	for i, seg := range segments {
+		entries[i] = concatEntry{Path: seg}
+	}
+
+	list, cleanup, err := writeConcatList(entries, filepath.Dir(dst), "segments")
 	if err != nil {
 		return err
 	}
@@ -278,7 +330,7 @@ func (e *Encoder) encodeArgs(list, dst string, outHeight int) []string {
 	// Without a logo the chain is a plain -vf. With one there is a second input
 	// to composite, which -vf cannot express.
 	if e.Logo == "" {
-		args = append(args, "-vf", e.filters())
+		args = append(args, "-vf", e.filters(outHeight))
 	} else {
 		args = append(args,
 			"-i", e.Logo,
@@ -322,16 +374,43 @@ func (e *Encoder) filterComplex(outHeight int) string {
 	margin := int(float64(outHeight)*e.logoMargin() + 0.5)
 
 	return strings.Join([]string{
-		"[0:v]" + e.filters() + "[base]",
+		"[0:v]" + e.filters(outHeight) + "[base]",
 		// -1 keeps the crest's own aspect, whatever shape the artwork is.
 		fmt.Sprintf("[1:v]scale=-1:%d:flags=lanczos[logo]", logoH),
 		fmt.Sprintf("[base][logo]overlay=%d:%d:format=auto,format=yuv420p[out]", margin, margin),
 	}, ";")
 }
 
+// stamp is the drawtext clause, empty when nothing is being labelled.
+//
+// It is placed after the deflicker in the chain on purpose: deflicker equalises
+// luminance across neighbouring frames, and text drawn before it would be dimmed
+// and brightened along with the sky behind it.
+//
+// The backing box is not decoration. This sky runs from near-white at midday to
+// black overnight, and no single text colour survives both — the same problem
+// the credit line in the overlay solves the same way.
+func (e *Encoder) stamp(outHeight int) string {
+	if e.Font == "" {
+		return ""
+	}
+	size := int(float64(outHeight)*e.stampHeight() + 0.5)
+	if size < 1 {
+		size = 1
+	}
+	margin := int(float64(outHeight)*e.stampMargin() + 0.5)
+
+	return fmt.Sprintf(
+		"drawtext=fontfile=%s:text='%%{metadata\\:d} %%{metadata\\:t}'"+
+			":x=w-tw-%d:y=%d:fontsize=%d:fontcolor=white"+
+			":box=1:boxcolor=black@0.45:boxborderw=%d",
+		e.Font, margin, margin, size, size/3,
+	)
+}
+
 // filters is the video filter chain.
-func (e *Encoder) filters() string {
-	return strings.Join([]string{
+func (e *Encoder) filters(outHeight int) string {
+	chain := []string{
 		// Lanczos because this is a 3x downscale of detailed terrain, where the
 		// default bilinear visibly softens ridgelines.
 		fmt.Sprintf("scale=%d:-2:flags=lanczos", e.width()),
@@ -339,8 +418,11 @@ func (e *Encoder) filters() string {
 		// consecutive pictures of the same scene differ in exposure by more than
 		// the scene does. Without this the result strobes.
 		"deflicker=mode=pm:size=10",
-		"format=yuv420p",
-	}, ",")
+	}
+	if s := e.stamp(outHeight); s != "" {
+		chain = append(chain, s)
+	}
+	return strings.Join(append(chain, "format=yuv420p"), ",")
 }
 
 // joinArgs builds the segments-to-product command line.
@@ -390,8 +472,16 @@ func lastLines(s string, n int) string {
 	return strings.TrimSpace(strings.Join(lines, "; "))
 }
 
+// concatEntry is one input in a concat list, and what it should be labelled
+// with. Date and Clock are empty for anything that carries no timestamp.
+type concatEntry struct {
+	Path  string
+	Date  string
+	Clock string
+}
+
 // writeConcatList writes an ffmpeg concat demuxer list next to the output.
-func writeConcatList(paths []string, dir, kind string) (string, func(), error) {
+func writeConcatList(entries []concatEntry, dir, kind string) (string, func(), error) {
 	f, err := os.CreateTemp(dir, "."+kind+"-*.txt")
 	if err != nil {
 		return "", func() {}, fmt.Errorf("timelapse: concat list: %w", err)
@@ -399,12 +489,23 @@ func writeConcatList(paths []string, dir, kind string) (string, func(), error) {
 	cleanup := func() { _ = os.Remove(f.Name()) }
 
 	var b strings.Builder
-	for _, p := range paths {
-		abs, err := filepath.Abs(p)
+	for _, e := range entries {
+		abs, err := filepath.Abs(e.Path)
 		if err != nil {
-			abs = p
+			abs = e.Path
 		}
 		b.WriteString("file " + quoteConcatPath(abs) + "\n")
+
+		// Attached to the packet rather than passed as a filter argument,
+		// because the label differs per frame and a filter argument is fixed for
+		// the whole run. drawtext reads it back with %{metadata:...}.
+		//
+		// The value ends at the first space, which is why the date and the clock
+		// travel as two keys and are joined in the drawtext template.
+		if e.Date != "" {
+			b.WriteString("file_packet_metadata d=" + e.Date + "\n")
+			b.WriteString("file_packet_metadata t=" + e.Clock + "\n")
+		}
 	}
 
 	if _, err := f.WriteString(b.String()); err != nil {

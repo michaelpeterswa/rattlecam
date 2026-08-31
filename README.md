@@ -497,6 +497,36 @@ is not in the repository, so an image built by CI cannot contain it. Put it at
 set `TIMELAPSE_LOGO` explicitly and it is a startup error if missing, because the
 alternative is publishing unbranded video for weeks and nobody noticing.
 
+### The clock in the corner
+
+Each frame carries the time it was taken, top-right, opposite the crest.
+
+It comes from the frame's own name. The archive files a master as `133510.jpg`
+under a dated directory, already in the site's local zone, so the label needs no
+EXIF, no conversion and no daylight-saving special case — the name *is* the wall
+clock a viewer is reading.
+
+**The minute is rounded up to the nearest ten.** The camera's frames land at
+00:04:25, 00:14:25, 00:24:40 and so on, so the true times drift by seconds and
+read as noise; rounding to the archive's own cadence makes the clock tick
+instead. Each frame stands for the ten minutes ending at the label it carries.
+
+One visible consequence, and it happens most days: the last frame of a day is
+usually after 23:50, so it rounds forward into the next day and shows
+`2026-08-27 00:00` at the end of the 26th's video. That is the honest label for
+a frame standing for the ten minutes that end at midnight, but it does look odd
+the first time.
+
+The label reaches ffmpeg as packet metadata on each frame in the concat list,
+because it differs per frame and a filter argument is fixed for the whole run.
+Two keys, not one: the concat demuxer ends a metadata value at the first space,
+so `d=2026-08-26` and `t=13:40` travel separately and the space lives in the
+drawtext template. A single combined value arrives truncated to the date, and
+the clock silently never appears.
+
+The face ships in the image rather than coming from the bucket, because unlike
+the crest it is OFL and committed. `TIMELAPSE_FONT=""` turns the clock off.
+
 ### Previews for embedding
 
 Each product gets a GIF, sized for dropping into a page as a plain `<img>`.
@@ -544,6 +574,9 @@ TIMELAPSE_LOGO_MARGIN   inset, fraction of frame height     (default 0.025)
 TIMELAPSE_GIF_WIDTH     preview width in pixels             (default 480)
 TIMELAPSE_GIF_FPS       preview playback rate               (default 12)
 TIMELAPSE_GIF_FRAMES    preview frame cap                   (default 200)
+TIMELAPSE_FONT          face for the timestamp; empty disables it
+TIMELAPSE_STAMP_HEIGHT  type size, fraction of frame height (default 0.045)
+TIMELAPSE_STAMP_MARGIN  inset from the top-right corner     (default 0.025)
 ```
 
 `-mode today` rebuilds only the today products, from today's frames. It is
