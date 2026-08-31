@@ -517,6 +517,13 @@ usually after 23:50, so it rounds forward into the next day and shows
 a frame standing for the ten minutes that end at midnight, but it does look odd
 the first time.
 
+The backing box is drawn at a fixed size rather than wrapped around the text.
+The face has proportional digits, so the rendered width changes as the clock
+advances — a `1` is narrower than a `0` — and a box that hugs the text changes
+width with it. Anchored to the right, that makes its left edge twitch against
+open sky every time a digit changes. A constant box with the text left-aligned
+inside it holds still, and the slack absorbs whatever the digits do.
+
 The label reaches ffmpeg as packet metadata on each frame in the concat list,
 because it differs per frame and a filter argument is fixed for the whole run.
 Two keys, not one: the concat demuxer ends a metadata value at the first space,

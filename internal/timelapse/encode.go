@@ -100,6 +100,17 @@ const (
 	// GIFs are rendered at.
 	DefaultStampHeight = 0.045
 	DefaultStampMargin = 0.025
+
+	// stampChars is the length of "2026-08-30 14:30", and stampAdvance a
+	// generous estimate of how wide one of its characters is relative to the
+	// type size. Together they fix the box so it does not resize as the digits
+	// change.
+	stampChars   = 16
+	stampAdvance = 0.52
+
+	// stampPadding is the inset from the box edge to the text, as a fraction of
+	// the type size.
+	stampPadding = 0.28
 )
 
 func (e *Encoder) ffmpeg() string {
@@ -381,30 +392,50 @@ func (e *Encoder) filterComplex(outHeight int) string {
 	}, ";")
 }
 
-// stamp is the drawtext clause, empty when nothing is being labelled.
+// stamp is the clause that labels each frame, empty when nothing is being
+// labelled.
 //
 // It is placed after the deflicker in the chain on purpose: deflicker equalises
 // luminance across neighbouring frames, and text drawn before it would be dimmed
 // and brightened along with the sky behind it.
 //
-// The backing box is not decoration. This sky runs from near-white at midday to
-// black overnight, and no single text colour survives both — the same problem
-// the credit line in the overlay solves the same way.
-func (e *Encoder) stamp(outHeight int) string {
+// The backing box is drawn separately, at a fixed size, rather than letting
+// drawtext wrap the text. The face has proportional digits, so the rendered
+// width changes as the clock advances — a 1 is narrower than a 0 — and a box
+// that hugs the text changes width with it. Anchored to the right, that makes
+// its left edge twitch against open sky every time a digit changes. A box of
+// constant size with the text left-aligned inside it holds still, and the slack
+// absorbs whatever the digits do.
+//
+// It is also not decoration: this sky runs from near-white at midday to black
+// overnight and no single text colour survives both, which is the same problem
+// the overlay's credit line solves the same way.
+func (e *Encoder) stamp(outWidth, outHeight int) string {
 	if e.Font == "" {
 		return ""
 	}
+
 	size := int(float64(outHeight)*e.stampHeight() + 0.5)
 	if size < 1 {
 		size = 1
 	}
 	margin := int(float64(outHeight)*e.stampMargin() + 0.5)
+	pad := int(float64(size)*stampPadding + 0.5)
+
+	// Sized for the longest label the format produces — "2026-08-30 14:30",
+	// sixteen characters — with room to spare, so the widest combination of
+	// digits still sits inside. Erring high costs a little empty space on the
+	// right and nothing else; erring low would clip the label.
+	boxW := int(float64(size)*stampAdvance*stampChars+0.5) + 2*pad
+	boxH := size + 2*pad
+	boxX := outWidth - boxW - margin
 
 	return fmt.Sprintf(
-		"drawtext=fontfile=%s:text='%%{metadata\\:d} %%{metadata\\:t}'"+
-			":x=w-tw-%d:y=%d:fontsize=%d:fontcolor=white"+
-			":box=1:boxcolor=black@0.45:boxborderw=%d",
-		e.Font, margin, margin, size, size/3,
+		"drawbox=x=%d:y=%d:w=%d:h=%d:color=black@0.45:t=fill,"+
+			"drawtext=fontfile=%s:text='%%{metadata\\:d} %%{metadata\\:t}'"+
+			":x=%d:y=%d:fontsize=%d:fontcolor=white",
+		boxX, margin, boxW, boxH,
+		e.Font, boxX+pad, margin+pad, size,
 	)
 }
 
@@ -419,7 +450,7 @@ func (e *Encoder) filters(outHeight int) string {
 		// the scene does. Without this the result strobes.
 		"deflicker=mode=pm:size=10",
 	}
-	if s := e.stamp(outHeight); s != "" {
+	if s := e.stamp(e.width(), outHeight); s != "" {
 		chain = append(chain, s)
 	}
 	return strings.Join(append(chain, "format=yuv420p"), ",")
