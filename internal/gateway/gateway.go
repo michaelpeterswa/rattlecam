@@ -52,6 +52,16 @@ type Served struct {
 	// undo the arithmetic the gateway exists to do.
 	CacheControl string
 
+	// Title and Description are what the index at / says about this object.
+	// An object with no Title is served but not listed, which is how something
+	// can stay reachable without being advertised.
+	Title       string
+	Description string
+
+	// Order sorts the index. Map iteration is random, and a listing whose rows
+	// move between refreshes is a listing nobody trusts.
+	Order int
+
 	// Optional marks an object that may legitimately not exist yet.
 	//
 	// The timelapses appear only after the nightly job has run once, and a
@@ -215,6 +225,11 @@ func (g *Gateway) Handler() http.Handler {
 	for route, served := range g.cfg.Objects {
 		mux.Handle("GET "+route, g.serve(served))
 	}
+
+	// The listing. Registered last and only for the exact path, so it cannot
+	// shadow a served object: "GET /" in this mux matches every path that has
+	// no better pattern, and "GET /{$}" matches the root alone.
+	mux.Handle("GET /{$}", g.index())
 	return mux
 }
 

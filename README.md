@@ -597,6 +597,14 @@ same `timelapse.Layout` and the same `timelapse.Variants` matrix the job
 publishes with, so the gateway cannot come to serve a set of objects that differs
 from the set that exists.
 
+`/` is a listing of all of it — every path, what it is, how big it is and when it
+was last written, grouped by frames, videos and previews. It is rendered from the
+same route table, so it cannot advertise something that is not served or omit
+something that is; an object with no `Title` is served but not listed, which is
+how something stays reachable without being published. Objects the relevant job
+has not built yet are listed as "not built yet" rather than hidden, because "not
+there yet" and "does not exist" are different answers.
+
 The videos are held in memory like everything else here, and they are much larger
 than a frame — the monthly alone runs to about 90 MB, and the full set is roughly
 200 MB. That is the same trade the frames make, read once per build rather than

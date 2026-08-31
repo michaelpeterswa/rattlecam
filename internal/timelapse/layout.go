@@ -177,3 +177,48 @@ func Day(t time.Time) time.Time {
 	y, m, d := t.Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, t.Location())
 }
+
+// Title names a product for a human.
+func Title(k Kind, v Variant) string {
+	name := map[Kind]string{
+		Today:     "Today so far",
+		Yesterday: "Yesterday",
+		Weekly:    "Last 7 days",
+		Monthly:   "Last 30 days",
+	}[k]
+	if name == "" {
+		name = string(k)
+	}
+	if v == DefaultVariant(k) {
+		return name
+	}
+	if v == DaylightOnly {
+		return name + ", daylight only"
+	}
+	return name + ", night included"
+}
+
+// Describe explains a product for a human, including the thing about it that is
+// not obvious from the name.
+//
+// It lives here rather than in the gateway because this package owns what a
+// kind and a variant mean; the gateway only decides where to put the words.
+func Describe(k Kind, v Variant) string {
+	base := map[Kind]string{
+		Today:     "Midnight until now, rebuilt every half hour.",
+		Yesterday: "The last complete day.",
+		Weekly:    "The last seven days end to end.",
+		Monthly:   "The last thirty days end to end.",
+	}[k]
+
+	switch {
+	case v == DaylightOnly && DefaultVariant(k) != DaylightOnly:
+		return base + " The hours the camera spent in infrared are dropped, which is shorter but skips the dawns and dusks."
+	case v == DaylightOnly:
+		return base + " Night is dropped: it would otherwise be a third of the running time as an unchanging black frame."
+	case v == Full && DefaultVariant(k) != Full:
+		return base + " Night included."
+	default:
+		return base + " Night included, so the transitions through dawn and dusk are there."
+	}
+}

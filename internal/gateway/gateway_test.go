@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -491,5 +492,172 @@ func TestRateLimitingStillAppliesToVideos(t *testing.T) {
 	}
 	if last != http.StatusTooManyRequests {
 		t.Errorf("status after five requests = %d, want 429", last)
+	}
+}
+
+// --- the listing at / --------------------------------------------------------
+
+func indexBody(t *testing.T, g *Gateway) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index status = %d, want 200", rec.Code)
+	}
+	return rec.Body.String()
+}
+
+func TestIndexListsEverythingItServes(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{Objects: map[string]Served{
+		"/latest-web.jpg":   {Object: "latest-web.jpg", Title: "Web frame", Description: "the small one", Order: 1},
+		"/latest-today.mp4": {Object: "timelapse/latest-today.mp4", Title: "Today so far", Description: "midnight until now", Order: 2},
+		"/latest-today.gif": {Object: "timelapse/latest-today.gif", Title: "Today so far", Description: "as a gif", Order: 3},
+	}})
+	g.refreshAll(context.Background())
+
+	body := indexBody(t, g)
+	for _, want := range []string{"/latest-web.jpg", "/latest-today.mp4", "/latest-today.gif", "midnight until now"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the listing does not mention %q", want)
+		}
+	}
+}
+
+// The point of grouping is that a reader can find the kind of thing they want
+// without reading every row.
+func TestIndexGroupsByFileType(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{Objects: map[string]Served{
+		"/latest-web.jpg":   {Object: "latest-web.jpg", Title: "Web frame", Order: 1},
+		"/latest-today.mp4": {Object: "timelapse/latest-today.mp4", Title: "Today", Order: 2},
+		"/latest-today.gif": {Object: "timelapse/latest-today.gif", Title: "Today", Order: 3},
+	}})
+	g.refreshAll(context.Background())
+
+	body := indexBody(t, g)
+	for _, want := range []string{"Live frames", "Timelapses", "Animated previews"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("no %q section in the listing", want)
+		}
+	}
+
+	// Frames before videos before previews: most immediate first.
+	frames := strings.Index(body, "Live frames")
+	videos := strings.Index(body, "Timelapses")
+	previews := strings.Index(body, "Animated previews")
+	if frames >= videos || videos >= previews {
+		t.Errorf("sections are out of order: frames=%d videos=%d previews=%d", frames, videos, previews)
+	}
+}
+
+// A listing whose rows move between refreshes is a listing nobody trusts, and
+// Go map iteration is deliberately random.
+func TestIndexOrderIsStableAcrossRequests(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{Objects: map[string]Served{
+		"/a.mp4": {Object: "a.mp4", Title: "A", Order: 1},
+		"/b.mp4": {Object: "b.mp4", Title: "B", Order: 2},
+		"/c.mp4": {Object: "c.mp4", Title: "C", Order: 3},
+		"/d.mp4": {Object: "d.mp4", Title: "D", Order: 4},
+	}})
+	g.refreshAll(context.Background())
+
+	first := indexBody(t, g)
+	for range 8 {
+		if got := indexBody(t, g); got != first {
+			t.Fatal("the listing changed between identical requests")
+		}
+	}
+
+	a, b := strings.Index(first, "/a.mp4"), strings.Index(first, "/b.mp4")
+	c, d := strings.Index(first, "/c.mp4"), strings.Index(first, "/d.mp4")
+	if a >= b || b >= c || c >= d {
+		t.Errorf("rows are not in Order sequence: a=%d b=%d c=%d d=%d", a, b, c, d)
+	}
+}
+
+// An object that has not been built yet is worth listing as absent rather than
+// omitting: "it is not there yet" and "it does not exist" are different answers.
+func TestIndexShowsAnObjectThatIsNotBuiltYet(t *testing.T) {
+	src := newSource("body")
+	src.failGet.Store(true)
+	g := newGateway(t, src, Config{Objects: map[string]Served{
+		"/latest-monthly.mp4": {Object: "timelapse/latest-monthly.mp4", Title: "Last 30 days", Optional: true, Order: 1},
+	}})
+	g.refreshAll(context.Background())
+
+	body := indexBody(t, g)
+	if !strings.Contains(body, "/latest-monthly.mp4") {
+		t.Error("an unbuilt object is missing from the listing entirely")
+	}
+	if !strings.Contains(body, "not built yet") {
+		t.Error("an unbuilt object is not marked as such")
+	}
+}
+
+// Something can be reachable without being advertised.
+func TestIndexOmitsAnObjectWithNoTitle(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{Objects: map[string]Served{
+		"/listed.jpg":   {Object: "listed.jpg", Title: "Listed", Order: 1},
+		"/unlisted.jpg": {Object: "unlisted.jpg", Order: 2},
+	}})
+	g.refreshAll(context.Background())
+
+	body := indexBody(t, g)
+	if strings.Contains(body, "/unlisted.jpg") {
+		t.Error("an object with no title was listed")
+	}
+	// ...but still served.
+	rec := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/unlisted.jpg", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("the unlisted object is not served: %d", rec.Code)
+	}
+}
+
+// "GET /" in a Go mux matches everything without a better pattern. The listing
+// must be pinned to the root alone or it becomes the handler for every typo.
+func TestIndexDoesNotSwallowUnknownPaths(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{})
+	g.refreshAll(context.Background())
+
+	rec := httptest.NewRecorder()
+	g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/nope.jpg", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown path = %d, want 404", rec.Code)
+	}
+}
+
+func TestIndexIsRateLimited(t *testing.T) {
+	src := newSource("body")
+	g := newGateway(t, src, Config{RatePerMinute: 1, Burst: 1})
+	g.refreshAll(context.Background())
+
+	var last int
+	for range 5 {
+		rec := httptest.NewRecorder()
+		g.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+		last = rec.Code
+	}
+	if last != http.StatusTooManyRequests {
+		t.Errorf("status after five requests = %d, want 429", last)
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{
+		{512, "512 B"},
+		{2048, "2 kB"},
+		{5 * 1 << 20, "5.0 MB"},
+	} {
+		if got := humanBytes(tc.n); got != tc.want {
+			t.Errorf("humanBytes(%d) = %q, want %q", tc.n, got, tc.want)
+		}
 	}
 }
