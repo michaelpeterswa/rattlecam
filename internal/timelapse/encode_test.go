@@ -573,3 +573,44 @@ func TestEncodeRejectsAFrameItCannotLabel(t *testing.T) {
 		t.Errorf("error = %v, want it to name the problem with the frame name", err)
 	}
 }
+
+// The box is fixed, so it has to fit the widest label the format can produce —
+// "2026-08-88 88:88" measures 0.381 of the type size per character through the
+// shipped face. Below that the clock clips; far above it the box is mostly empty
+// space, which is what the first version of this got wrong.
+func TestTheStampBoxFitsTheWidestLabelWithoutWaste(t *testing.T) {
+	const (
+		measuredWidest = 0.381 // per character, as a fraction of the type size
+		headroom       = 1.15  // beyond which the box is just padding
+	)
+
+	if stampAdvance < measuredWidest {
+		t.Errorf("stampAdvance = %.3f, below the measured %.3f: the widest label would clip",
+			stampAdvance, measuredWidest)
+	}
+	if stampAdvance > measuredWidest*headroom {
+		t.Errorf("stampAdvance = %.3f, more than %.0f%% over the measured %.3f: the box is mostly empty",
+			stampAdvance, (headroom-1)*100, measuredWidest)
+	}
+}
+
+// Whatever the type size, the box has to stay wide enough for the text plus its
+// padding on both sides.
+func TestTheStampBoxIsWiderThanItsText(t *testing.T) {
+	for _, height := range []float64{0.03, 0.045, 0.08} {
+		e := &Encoder{Width: 1280, Font: "/f.ttf", StampHeight: height}
+		size := int(720*height + 0.5)
+		pad := int(float64(size)*stampPadding + 0.5)
+
+		boxW := int(float64(size)*stampAdvance*stampChars+0.5) + 2*pad
+		widest := int(float64(size)*0.381*stampChars + 0.5)
+
+		if boxW < widest+2*pad {
+			t.Errorf("at height %.3f the box is %dpx and the widest label plus padding is %dpx",
+				height, boxW, widest+2*pad)
+		}
+		if got := e.stamp(1280, 720); got == "" {
+			t.Errorf("at height %.3f the stamp is empty", height)
+		}
+	}
+}
