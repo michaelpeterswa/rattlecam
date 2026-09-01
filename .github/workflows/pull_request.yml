@@ -36,7 +36,7 @@ jobs:
       # none is available. The fonts are committed, so the suite runs against
       # the same face that ships rather than whatever the runner happens to have.
       - name: Fail if the font is missing
-        run: test -f assets/font.ttf && test -f assets/font-bold.ttf
+        run: test -f assets/font.ttf && test -f assets/font-bold.ttf && test -f assets/font-mono.ttf
 
       - name: Build
         run: go build ./...

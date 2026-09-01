@@ -94,6 +94,8 @@ All writes go temp-file → `rename`, so a web server never serves a torn frame.
 
 Drop three files in `assets/` (or point the env vars elsewhere):
 
+- `font-mono.ttf` — Chivo Mono Regular, the timelapse clock's face. Monospaced
+  so the timestamp keeps one width as it ticks.
 - `font.ttf`, `font-bold.ttf` — a condensed grotesque reads best in a lower
   third. Inter, Barlow Condensed and Roboto Condensed all work.
 - `logo.png` — transparent PNG.
@@ -517,17 +519,27 @@ usually after 23:50, so it rounds forward into the next day and shows
 a frame standing for the ten minutes that end at midnight, but it does look odd
 the first time.
 
-The backing box is drawn at a fixed size rather than wrapped around the text.
-The face has proportional digits, so the rendered width changes as the clock
-advances — a `1` is narrower than a `0` — and a box that hugs the text changes
-width with it. Anchored to the right, that makes its left edge twitch against
-open sky every time a digit changes. A constant box with the text left-aligned
-inside it holds still, and the slack absorbs whatever the digits do.
+**The clock is set in a monospaced face**, Chivo Mono, rather than the
+condensed one the daemon draws the overlay in. Proportional digits change width
+as the clock advances — a `1` is narrower than a `0` — so a box that hugs the
+text twitches at its left edge, against open sky, every time a digit changes,
+and a box that does not hug it has to stand at the widest label the format can
+produce and show the slack on the right. Monospaced, every one of the sixteen
+characters advances 0.6 of the type size whatever digit it is, so all labels
+measure alike and the box is an exact fit that never moves.
 
-Its width is measured rather than guessed. The widest label the format can
-produce — `2026-08-88 88:88` — renders 195 px through this face at 32 px type,
-which is 0.381 of the type size per character; the box carries a little over
-that and no more, because every point above it is empty space on the right.
+The box is still drawn separately from the text rather than by `drawtext`'s own
+`box=1`, and computed from that advance: 9.6 ems of text plus padding. The only
+slack in it is a few percent for `drawtext` rounding hinted glyph advances to
+whole pixels, and the text is centred in the box — by `drawtext`'s own `text_w`
+and `text_h`, which is what was actually laid out — so that slack is split
+evenly either side instead of pooling on the right. Centring is safe here only
+because the face is monospaced: those measurements are the same on every frame,
+so nothing slides inside a box that is not moving.
+
+Because the face changes every stamped pixel, it is part of the segment
+fingerprint alongside the type size — otherwise a month rebuilt across the
+change would be stitched from segments in two different faces.
 
 The label reaches ffmpeg as packet metadata on each frame in the concat list,
 because it differs per frame and a filter argument is fixed for the whole run.
@@ -537,7 +549,8 @@ drawtext template. A single combined value arrives truncated to the date, and
 the clock silently never appears.
 
 The face ships in the image rather than coming from the bucket, because unlike
-the crest it is OFL and committed. `TIMELAPSE_FONT=""` turns the clock off.
+the crest it is OFL and committed. `TIMELAPSE_FONT=""` turns the clock off, and
+pointing it at a proportional face works but puts the twitch back.
 
 ### Previews for embedding
 
@@ -587,6 +600,8 @@ TIMELAPSE_GIF_WIDTH     preview width in pixels             (default 480)
 TIMELAPSE_GIF_FPS       preview playback rate               (default 12)
 TIMELAPSE_GIF_FRAMES    preview frame cap                   (default 200)
 TIMELAPSE_FONT          face for the timestamp; empty disables it
+                        (default the committed Chivo Mono; monospaced on
+                        purpose, see "The clock in the corner")
 TIMELAPSE_STAMP_HEIGHT  type size, fraction of frame height (default 0.045)
 TIMELAPSE_STAMP_MARGIN  inset from the top-right corner     (default 0.025)
 ```
