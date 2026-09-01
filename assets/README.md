@@ -3,9 +3,10 @@
 Branding, read from disk at runtime rather than compiled in, so the logo or a
 font can change without rebuilding and redeploying the daemon.
 
-The fonts are committed. Barlow Condensed is licensed under the SIL Open Font
-License, which permits redistribution, so a clean checkout renders and a
-CI-built image is self-contained — see `OFL-BarlowCondensed.txt`.
+The fonts are committed. Barlow Condensed and Chivo Mono are both licensed under
+the SIL Open Font License, which permits redistribution, so a clean checkout
+renders and a CI-built image is self-contained — see `OFL-BarlowCondensed.txt`
+and `OFL-ChivoMono.txt`.
 
 The artwork is not committed and is placed on the host by hand. The logo and the
 peak annotation belong to the agency, and a public repository is the wrong place
@@ -17,8 +18,29 @@ Nothing renders until the fonts and, if you want a mark, the logo exist.
 | --- | --- |
 | `font.ttf` | **Committed.** Barlow Condensed Regular. A condensed grotesque reads best in a lower third; Inter and Roboto Condensed also work and are likewise OFL. |
 | `font-bold.ttf` | **Committed.** Barlow Condensed Bold. Values and the site name use it. |
+| `font-mono.ttf` | **Committed.** Chivo Mono Regular. The timelapse timestamp only, and it has to stay monospaced: the box behind the clock is sized from a fixed per-character advance, so a proportional face here would clip the label or leave it rattling in an oversized box. See the note below on where this file comes from. |
 | `logo.png` | *Not committed.* Transparent PNG. See the note on shape below. |
 | `annotation.png` | *Not committed, optional.* Full-frame registered overlay — peak outlines and names. Must match the camera's aspect ratio. |
+
+## Where `font-mono.ttf` comes from
+
+Google Fonts ships Chivo Mono only as a variable font, and its default instance
+is **Medium (wght 500)**, not Regular. `drawtext` has no way to set a variation
+axis — it renders whatever the file's default instance is — so the committed file
+is a static Regular pinned out of the variable one:
+
+```
+pip install fonttools
+python -c "
+from fontTools.ttLib import TTFont
+from fontTools.varLib import instancer
+f = instancer.instantiateVariableFont(TTFont('ChivoMono[wght].ttf'), {'wght': 400}, updateFontNames=True)
+f.save('assets/font-mono.ttf')
+"
+```
+
+Dropping the variable file in unchanged would work and would quietly set the
+clock a weight heavier than intended.
 
 ## Logo shape decides placement
 

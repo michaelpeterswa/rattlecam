@@ -52,10 +52,11 @@ USER 65532:65532
 
 ENV TMPDIR=/tmp
 
-# The face the timestamp is drawn in. It is OFL and committed, unlike the crest,
-# which is the agency's and comes from the bucket at run time — so this one can
-# simply ship in the image.
-COPY --from=build /src/assets/font.ttf /usr/local/share/rattlecam/font.ttf
+# The face the timestamp is drawn in — the monospaced one, so the clock keeps a
+# constant width as it ticks. It is OFL and committed, unlike the crest, which is
+# the agency's and comes from the bucket at run time, so this one can simply ship
+# in the image.
+COPY --from=build /src/assets/font-mono.ttf /usr/local/share/rattlecam/font-mono.ttf
 
 COPY --from=build /out/timelapse /usr/local/bin/timelapse
 

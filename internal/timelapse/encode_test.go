@@ -8,6 +8,20 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/fogleman/gg"
+)
+
+const (
+	// stampFace is the committed face the shipped clock is drawn in, measured
+	// here rather than assumed: the box is sized from a constant, and only the
+	// real file can say whether that constant still fits.
+	stampFace = "../../assets/font-mono.ttf"
+
+	// monoAdvance is what that face measures per character, as a fraction of the
+	// type size. Chivo Mono advances every glyph 600 units of its 1000-unit em;
+	// the test above checks the file still does.
+	monoAdvance = 0.6
 )
 
 // argValue returns the value following a flag, and whether it was present.
@@ -383,6 +397,24 @@ func TestFingerprintSeparatesStampedFromUnstamped(t *testing.T) {
 	}
 }
 
+// Changing the face redraws every stamp on the frame, so segments carrying the
+// old one are no more joinable to the new than an unstamped segment is. This is
+// what kept the move from the condensed face to the monospaced one from leaving
+// a month stitched from both.
+func TestFingerprintTracksTheFace(t *testing.T) {
+	a := (&Encoder{Width: 1280, FPS: 24, CRF: 25, Font: "/share/font.ttf"}).Fingerprint()
+	b := (&Encoder{Width: 1280, FPS: 24, CRF: 25, Font: "/share/font-mono.ttf"}).Fingerprint()
+
+	if a == b {
+		t.Fatalf("two faces share the fingerprint %q", a)
+	}
+	// It also has to be the same name every run, or yesterday's segments are
+	// unreachable this morning and the whole archive re-encodes nightly.
+	if again := (&Encoder{Width: 1280, FPS: 24, CRF: 25, Font: "/share/font.ttf"}).Fingerprint(); again != a {
+		t.Errorf("the same face fingerprinted %q and then %q", a, again)
+	}
+}
+
 // deflicker equalises luminance across neighbouring frames. Text drawn before it
 // would be dimmed and brightened along with the sky behind it.
 func TestTheStampIsDrawnAfterTheDeflicker(t *testing.T) {
@@ -425,18 +457,18 @@ func TestTheStampHasABackingBox(t *testing.T) {
 	}
 }
 
-// The face has proportional digits, so a box that hugs the text changes width as
-// the clock advances — and anchored to the right, its left edge twitches against
-// open sky every time a digit changes. The box has to be a constant, independent
-// of what it is going to contain.
+// A box that hugs the text moves with it, and anchored to the right its left
+// edge twitches against open sky. The box has to be a constant, independent of
+// what it is going to contain — the text may be placed from what was rendered,
+// because it is centred inside a box that is not moving, but the box may not.
 func TestTheStampBoxDoesNotMoveWithTheDigits(t *testing.T) {
 	e := &Encoder{Width: 1280, Font: "/f.ttf", StampHeight: 0.045, StampMargin: 0.025}
 	chain := e.filters(720)
 
-	// Nothing in the geometry may depend on the rendered text.
-	for _, dynamic := range []string{"tw", "text_w", "max_glyph_w"} {
-		if strings.Contains(chain, dynamic) {
-			t.Errorf("chain = %q, geometry depends on %q and will move with the text", chain, dynamic)
+	box := chain[strings.Index(chain, "drawbox="):strings.Index(chain, "drawtext=")]
+	for _, dynamic := range []string{"tw", "text_w", "text_h", "max_glyph_w"} {
+		if strings.Contains(box, dynamic) {
+			t.Errorf("box = %q, its geometry depends on %q and will move with the text", box, dynamic)
 		}
 	}
 
@@ -460,23 +492,25 @@ func TestTheStampTracksTheFrameWidth(t *testing.T) {
 	}
 }
 
-// The text is inset from the box edge rather than flush against it.
-func TestTheStampTextIsPaddedInsideItsBox(t *testing.T) {
+// The text sits in the middle of its box, not in a corner of it, and it is
+// drawtext that centres it: only the renderer knows what it actually laid out,
+// so an origin computed here would be centring an estimate.
+func TestTheStampTextIsCentredInItsBox(t *testing.T) {
 	e := &Encoder{Width: 1280, Font: "/f.ttf", StampHeight: 0.045, StampMargin: 0.025}
 	chain := e.stamp(1280, 720)
 
-	var boxX, textX int
-	if _, err := fmt.Sscanf(chain[strings.Index(chain, "drawbox=x=")+len("drawbox=x="):], "%d", &boxX); err != nil {
-		t.Fatalf("no box origin in %q", chain)
+	var boxX, boxY, boxW, boxH int
+	if _, err := fmt.Sscanf(chain, "drawbox=x=%d:y=%d:w=%d:h=%d", &boxX, &boxY, &boxW, &boxH); err != nil {
+		t.Fatalf("no box geometry in %q", chain)
 	}
-	after := chain[strings.Index(chain, "fontcolor")-40:]
-	if i := strings.Index(chain, ":x="); i >= 0 {
-		if _, err := fmt.Sscanf(chain[i+3:], "%d", &textX); err != nil {
-			t.Fatalf("no text origin in %q (%q)", chain, after)
+
+	for _, want := range []string{
+		fmt.Sprintf(":x=%d+(%d-text_w)/2", boxX, boxW),
+		fmt.Sprintf(":y=%d+(%d-text_h)/2", boxY, boxH),
+	} {
+		if !strings.Contains(chain, want) {
+			t.Errorf("chain = %q, want it to centre the text with %q", chain, want)
 		}
-	}
-	if textX <= boxX {
-		t.Errorf("text starts at %d and the box at %d; the text should be padded inside it", textX, boxX)
 	}
 }
 
@@ -574,23 +608,48 @@ func TestEncodeRejectsAFrameItCannotLabel(t *testing.T) {
 	}
 }
 
-// The box is fixed, so it has to fit the widest label the format can produce —
-// "2026-08-88 88:88" measures 0.381 of the type size per character through the
-// shipped face. Below that the clock clips; far above it the box is mostly empty
-// space, which is what the first version of this got wrong.
-func TestTheStampBoxFitsTheWidestLabelWithoutWaste(t *testing.T) {
-	const (
-		measuredWidest = 0.381 // per character, as a fraction of the type size
-		headroom       = 1.15  // beyond which the box is just padding
-	)
+// The whole point of setting the clock in a monospaced face: every label the
+// format can produce measures the same, so the fixed box is an exact fit rather
+// than a worst case. Measured through the face that actually ships, because a
+// proportional file dropped in at that path would put the twitch straight back.
+func TestEveryLabelMeasuresTheSameThroughTheShippedFace(t *testing.T) {
+	const size = 32
 
-	if stampAdvance < measuredWidest {
-		t.Errorf("stampAdvance = %.3f, below the measured %.3f: the widest label would clip",
-			stampAdvance, measuredWidest)
+	dc := gg.NewContext(1, 1)
+	if err := dc.LoadFontFace(stampFace, size); err != nil {
+		t.Fatalf("loading %s: %v", stampFace, err)
 	}
-	if stampAdvance > measuredWidest*headroom {
+
+	// The extremes of the format — every digit an 8, a 0, a 1 — and a couple of
+	// real labels.
+	labels := []string{
+		"2026-08-88 88:88",
+		"0000-00-00 00:00",
+		"1111-11-11 11:11",
+		"2026-08-30 14:30",
+		"2026-12-31 23:59",
+	}
+
+	want, _ := dc.MeasureString(labels[0])
+	for _, l := range labels[1:] {
+		if got, _ := dc.MeasureString(l); got != want {
+			t.Errorf("%q measures %.1fpx and %q %.1fpx: the face is not monospaced",
+				labels[0], want, l, got)
+		}
+	}
+
+	// And the constant the box is built from has to cover that measurement, with
+	// only the little carry the renderer's pixel rounding needs.
+	const headroom = 1.10
+
+	measured := want / size / stampChars
+	if stampAdvance < measured {
+		t.Errorf("stampAdvance = %.3f, below the measured %.3f: the label would clip",
+			stampAdvance, measured)
+	}
+	if stampAdvance > measured*headroom {
 		t.Errorf("stampAdvance = %.3f, more than %.0f%% over the measured %.3f: the box is mostly empty",
-			stampAdvance, (headroom-1)*100, measuredWidest)
+			stampAdvance, (headroom-1)*100, measured)
 	}
 }
 
@@ -603,7 +662,7 @@ func TestTheStampBoxIsWiderThanItsText(t *testing.T) {
 		pad := int(float64(size)*stampPadding + 0.5)
 
 		boxW := int(float64(size)*stampAdvance*stampChars+0.5) + 2*pad
-		widest := int(float64(size)*0.381*stampChars + 0.5)
+		widest := int(float64(size)*monoAdvance*stampChars + 0.5)
 
 		if boxW < widest+2*pad {
 			t.Errorf("at height %.3f the box is %dpx and the widest label plus padding is %dpx",

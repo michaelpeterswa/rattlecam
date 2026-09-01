@@ -17,6 +17,7 @@
 //	TIMELAPSE_LOGO_HEIGHT   logo height as a fraction of frame  (default 0.34)
 //	TIMELAPSE_LOGO_MARGIN   inset as a fraction of frame height (default 0.025)
 //	TIMELAPSE_FONT          face for the timestamp; empty disables it
+//	                        (default the image's monospaced font-mono.ttf)
 //	TIMELAPSE_STAMP_HEIGHT  type size as a fraction of frame height (default 0.045)
 //	TIMELAPSE_STAMP_MARGIN  inset from the top-right corner       (default 0.025)
 //	TIMELAPSE_GIF_WIDTH     preview width in pixels             (default 480)
@@ -176,8 +177,11 @@ func run(log *slog.Logger) error {
 		LogoMargin: envFloat("TIMELAPSE_LOGO_MARGIN", timelapse.DefaultLogoMargin),
 
 		// The face ships in the image: it is OFL and committed, unlike the
-		// crest, so there is nothing to fetch and nothing to place by hand.
-		Font:        envString("TIMELAPSE_FONT", "/usr/local/share/rattlecam/font.ttf"),
+		// crest, so there is nothing to fetch and nothing to place by hand. It
+		// is the monospaced one rather than the daemon's condensed face, because
+		// a clock set in proportional digits changes width as it ticks and the
+		// box behind it cannot then be still.
+		Font:        envString("TIMELAPSE_FONT", "/usr/local/share/rattlecam/font-mono.ttf"),
 		StampHeight: envFloat("TIMELAPSE_STAMP_HEIGHT", timelapse.DefaultStampHeight),
 		StampMargin: envFloat("TIMELAPSE_STAMP_MARGIN", timelapse.DefaultStampMargin),
 	}

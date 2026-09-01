@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"image/jpeg"
 	"os"
 	"os/exec"
@@ -103,17 +104,24 @@ const (
 
 	// stampChars is the length of "2026-08-30 14:30", and stampAdvance how wide
 	// one of its characters is relative to the type size. Together they fix the
-	// box so it does not resize as the digits change.
+	// box, which the clock face makes an exact calculation rather than a bound.
 	//
-	// stampAdvance is measured, not guessed. Rendering the widest label the
-	// format can produce — "2026-08-88 88:88", every digit an 8 — through this
-	// face at 32 px gives 195 px, which is 0.381 of the type size per character.
-	// Real labels come out narrower: 0.373 for one full of zeros, 0.357 for one
-	// full of ones. The value here carries a little over that widest case so the
-	// text cannot clip, and no more, because every point above it is empty space
-	// on the right of a box that is only as useful as it is tight.
+	// The clock is set in a monospaced face for this reason: every glyph in Chivo
+	// Mono advances 0.6 of the type size, so all 16 characters of every label the
+	// format can produce measure the same 9.6 ems — "2026-08-88 88:88" and
+	// "1111-11-11 11:11" alike. With a proportional face they did not, and the
+	// box either hugged a width that changed with the digits or had to be padded
+	// out to a measured worst case.
+	//
+	// The small carry over 0.6 is for the renderer, not the face: ffmpeg's
+	// drawtext lays glyphs out with hinted advances rounded to whole pixels, so
+	// a line can come out a fraction of a pixel per character wider than the
+	// design metric. Sixteen characters of that is a couple of pixels, and the
+	// carry covers it without leaving a visible gutter. The text is centred in
+	// the box, so what the carry buys is split evenly either side rather than
+	// pooling on the right.
 	stampChars   = 16
-	stampAdvance = 0.39
+	stampAdvance = 0.63
 
 	// stampPadding is the inset from the box edge to the text, as a fraction of
 	// the type size.
@@ -217,11 +225,26 @@ func (e *Encoder) Fingerprint() string {
 		fp += fmt.Sprintf("-logo%d", int(e.logoHeight()*100+0.5))
 	}
 	// A stamped segment and an unstamped one are not interchangeable either, and
-	// the size changes the pixels as surely as the presence does.
+	// the size changes the pixels as surely as the presence does. So does the
+	// face: the day the clock moved from a proportional face to a monospaced one
+	// every stamp on the frame changed shape, and without the face in the name a
+	// rebuilt month would have been stitched from both. The path stands in for
+	// the face, which catches a swap to a different file but not a different file
+	// at the same path — replacing one in place is a deploy-time act, and the
+	// answer to it is a new name, not a checksum read on every fingerprint.
 	if e.Font != "" {
-		fp += fmt.Sprintf("-ts%d", int(e.stampHeight()*1000+0.5))
+		fp += fmt.Sprintf("-ts%d-f%08x", int(e.stampHeight()*1000+0.5), fontKey(e.Font))
 	}
 	return fp
+}
+
+// fontKey is a stable short hash of the font path, for the fingerprint. FNV-1a
+// because this identifies a setting, not a secret: it is cheap and gives the
+// same answer on every run and every machine, which is all an object name needs.
+func fontKey(path string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(path)) // hash.Hash never errors
+	return h.Sum32()
 }
 
 // Encode writes frames to dst as an H.264 mp4.
@@ -406,13 +429,14 @@ func (e *Encoder) filterComplex(outHeight int) string {
 // luminance across neighbouring frames, and text drawn before it would be dimmed
 // and brightened along with the sky behind it.
 //
-// The backing box is drawn separately, at a fixed size, rather than letting
-// drawtext wrap the text. The face has proportional digits, so the rendered
-// width changes as the clock advances — a 1 is narrower than a 0 — and a box
-// that hugs the text changes width with it. Anchored to the right, that makes
-// its left edge twitch against open sky every time a digit changes. A box of
-// constant size with the text left-aligned inside it holds still, and the slack
-// absorbs whatever the digits do.
+// The backing box is drawn separately, at a size computed from the label rather
+// than by letting drawtext wrap the text, with the text centred inside it. The
+// clock is set in a monospaced face, so every label the format can produce is
+// the same width and the computed box fits all of them: anchored to the right,
+// its left edge holds still against open sky as the digits change. A
+// proportional face made that width a moving target — a 1 is narrower than a 0 —
+// and the box either twitched with the text or stood at a measured worst case
+// with the slack showing on the right.
 //
 // It is also not decoration: this sky runs from near-white at midday to black
 // overnight and no single text colour survives both, which is the same problem
@@ -429,20 +453,25 @@ func (e *Encoder) stamp(outWidth, outHeight int) string {
 	margin := int(float64(outHeight)*e.stampMargin() + 0.5)
 	pad := int(float64(size)*stampPadding + 0.5)
 
-	// Sized for the longest label the format produces — "2026-08-30 14:30",
-	// sixteen characters — with room to spare, so the widest combination of
-	// digits still sits inside. Erring high costs a little empty space on the
-	// right and nothing else; erring low would clip the label.
+	// Sized for the label the format produces — "2026-08-30 14:30", sixteen
+	// characters — which in a monospaced face is one width, not a range, so
+	// there is no worst case to leave room for beyond the renderer's rounding.
 	boxW := int(float64(size)*stampAdvance*stampChars+0.5) + 2*pad
 	boxH := size + 2*pad
 	boxX := outWidth - boxW - margin
 
+	// The text is centred in the box by drawtext's own expressions rather than
+	// by an origin computed here: text_w and text_h are what the renderer
+	// actually laid out, so the centring absorbs the carry above and whatever
+	// the face's vertical metrics do, neither of which this code can see. A
+	// monospaced face makes them constant frame to frame, so nothing shifts as
+	// the clock ticks.
 	return fmt.Sprintf(
 		"drawbox=x=%d:y=%d:w=%d:h=%d:color=black@0.45:t=fill,"+
 			"drawtext=fontfile=%s:text='%%{metadata\\:d} %%{metadata\\:t}'"+
-			":x=%d:y=%d:fontsize=%d:fontcolor=white",
+			":x=%d+(%d-text_w)/2:y=%d+(%d-text_h)/2:fontsize=%d:fontcolor=white",
 		boxX, margin, boxW, boxH,
-		e.Font, boxX+pad, margin+pad, size,
+		e.Font, boxX, boxW, margin, boxH, size,
 	)
 }
 
