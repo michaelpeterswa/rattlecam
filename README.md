@@ -524,6 +524,11 @@ width with it. Anchored to the right, that makes its left edge twitch against
 open sky every time a digit changes. A constant box with the text left-aligned
 inside it holds still, and the slack absorbs whatever the digits do.
 
+Its width is measured rather than guessed. The widest label the format can
+produce — `2026-08-88 88:88` — renders 195 px through this face at 32 px type,
+which is 0.381 of the type size per character; the box carries a little over
+that and no more, because every point above it is empty space on the right.
+
 The label reaches ffmpeg as packet metadata on each frame in the concat list,
 because it differs per frame and a filter argument is fixed for the whole run.
 Two keys, not one: the concat demuxer ends a metadata value at the first space,

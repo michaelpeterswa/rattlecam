@@ -101,12 +101,19 @@ const (
 	DefaultStampHeight = 0.045
 	DefaultStampMargin = 0.025
 
-	// stampChars is the length of "2026-08-30 14:30", and stampAdvance a
-	// generous estimate of how wide one of its characters is relative to the
-	// type size. Together they fix the box so it does not resize as the digits
-	// change.
+	// stampChars is the length of "2026-08-30 14:30", and stampAdvance how wide
+	// one of its characters is relative to the type size. Together they fix the
+	// box so it does not resize as the digits change.
+	//
+	// stampAdvance is measured, not guessed. Rendering the widest label the
+	// format can produce — "2026-08-88 88:88", every digit an 8 — through this
+	// face at 32 px gives 195 px, which is 0.381 of the type size per character.
+	// Real labels come out narrower: 0.373 for one full of zeros, 0.357 for one
+	// full of ones. The value here carries a little over that widest case so the
+	// text cannot clip, and no more, because every point above it is empty space
+	// on the right of a box that is only as useful as it is tight.
 	stampChars   = 16
-	stampAdvance = 0.52
+	stampAdvance = 0.39
 
 	// stampPadding is the inset from the box edge to the text, as a fraction of
 	// the type size.
