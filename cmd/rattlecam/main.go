@@ -17,6 +17,7 @@ import (
 	runtimemetrics "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 
+	"github.com/michaelpeterswa/rattlecam/internal/aqi"
 	"github.com/michaelpeterswa/rattlecam/internal/config"
 	"github.com/michaelpeterswa/rattlecam/internal/frame"
 	"github.com/michaelpeterswa/rattlecam/internal/gcs"
@@ -138,6 +139,7 @@ func run(log *slog.Logger) error {
 		cfg.InfluxBucket, cfg.InfluxStation, cfg.StaleAfter)
 
 	conditions := nws.New(cfg.NWSStationID, cfg.NWSUserAgent)
+	air := aqi.New(cfg.AQIURL)
 
 	pub := &publish.Publisher{
 		OutputDir:      cfg.OutputDir,
@@ -197,6 +199,8 @@ func run(log *slog.Logger) error {
 		StaleAfter: cfg.StaleAfter,
 		Location:   loc,
 		MaxFields:  theme.MaxFields,
+		// Six publish cycles: a feed that quiet has a problem worth hiding.
+		AirStaleAfter: airStaleAfter,
 	}
 
 	if err := selfTest(ctx, cam, renderer, params); err != nil {
@@ -208,6 +212,10 @@ func run(log *slog.Logger) error {
 		log.Warn("nws refresh failed", "error", err)
 		m.NWSError(ctx)
 	})
+	go air.Run(ctx, cfg.AQIInterval, func(err error) {
+		log.Warn("aqi refresh failed", "error", err)
+		m.AQIError(ctx)
+	})
 	go prune(ctx, pub, log)
 	if drainer != nil {
 		go drainer.run(ctx)
@@ -218,6 +226,7 @@ func run(log *slog.Logger) error {
 	d := &daemon{
 		cfg: cfg, log: log,
 		cam: cam, source: source, conditions: conditions,
+		air:      air,
 		renderer: renderer, pub: pub,
 		metrics: m,
 		drainer: drainer,
@@ -235,6 +244,7 @@ type daemon struct {
 	cam        *protect.Client
 	source     *wx.InfluxSource
 	conditions *nws.Client
+	air        *aqi.Client
 	renderer   *overlay.Renderer
 	pub        *publish.Publisher
 	metrics    *metrics.Metrics
@@ -369,7 +379,7 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 	if c := d.conditions.Latest(); c != nil && now.Sub(c.ObservedAt) < 90*time.Minute {
 		conditions = c.Text
 	}
-	f := frame.Build(d.params, d.lastGood, conditions, now)
+	f := frame.Build(d.params, d.lastGood, conditions, d.air.Latest(), now)
 
 	// Measured off the frame we are about to publish, so the treatment always
 	// matches the picture it is drawn on rather than trailing it by one cycle.
@@ -541,6 +551,9 @@ func startTelemetry(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 // matter most depend on the camera's actual resolution and aspect, and the
 // widest built-in scenario because a layout that only survives a mild afternoon
 // should fail here rather than on the first stormy day.
+// airStaleAfter is how old an air quality reading may be and still be drawn.
+const airStaleAfter = 30 * time.Minute
+
 func selfTest(ctx context.Context, cam *protect.Client, r *overlay.Renderer, p frame.Params) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -561,7 +574,7 @@ func selfTest(ctx context.Context, cam *protect.Client, r *overlay.Renderer, p f
 	// one extra resample of the annotation at startup.
 	now := time.Now()
 	for _, night := range []bool{false, true} {
-		f := frame.Build(p, sc.Reading(now), sc.Conditions, now)
+		f := frame.Build(p, sc.Reading(now), sc.Conditions, sc.AirReading(now), now)
 		f.Night = night
 		if _, err := r.Render(still.Image, f); err != nil {
 			return fmt.Errorf("startup render check (night=%v): %w", night, err)

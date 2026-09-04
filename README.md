@@ -51,6 +51,8 @@ layout you tuned against one pleasant afternoon reading:
 | `stale` | Observation past threshold — every data field drops out |
 | `offline` | Station silent; the image still publishes, bare |
 | `no-conditions` | api.weather.gov unreachable; site name sits alone |
+| `smoke` | Wildfire smoke — a "214 V. Unhealthy" index beside an ordinary station reading |
+| `stale-air` | Station fresh but the air quality feed quiet — that one field drops, the rest stay |
 
 Point `-scenarios` at your own JSON to render against a real observation you
 pulled off the station.
@@ -189,6 +191,8 @@ advancing.
 | `INFLUX_STATION` | *(unset)* | Tempest serial, e.g. `ST-00000512` |
 | `NWS_STATION_ID` | *(unset)* | e.g. `KPAE`; unset hides the conditions line |
 | `NWS_USER_AGENT` | `rattlecam` | api.weather.gov requires identification |
+| `AQI_URL` | *(unset)* | Prefix [aqi-api](https://github.com/michaelpeterswa/aqi-api) publishes under, e.g. `https://storage.googleapis.com/<bucket>/aqi/v1`; unset hides the air quality field |
+| `AQI_INTERVAL` | `5m` | How often to re-read the published index; it republishes every five minutes |
 | `SITE_NAME` | *(unset)* | Rendered at the left of the bar |
 | `ANNOTATION_PATH` | `assets/annotation.png` | Registered overlay, e.g. peak outlines; absent at the default path is fine |
 | `CREDIT` | *(unset)* | Standing attribution, e.g. `This view is provided by RSVU`; placed by `credit_placement` |

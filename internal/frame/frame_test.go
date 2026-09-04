@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/michaelpeterswa/rattlecam/internal/aqi"
 	"github.com/michaelpeterswa/rattlecam/internal/overlay"
 	"github.com/michaelpeterswa/rattlecam/internal/wx"
 )
@@ -16,6 +17,8 @@ func params() Params {
 		StaleAfter: 10 * time.Minute,
 		Location:   time.UTC,
 		MaxFields:  6,
+
+		AirStaleAfter: 30 * time.Minute,
 	}
 }
 
@@ -52,7 +55,7 @@ func value(t *testing.T, f overlay.Frame, label string) string {
 // the evening news is not.
 func TestStaleReadingYieldsZeroFields(t *testing.T) {
 	now := time.Now()
-	f := Build(params(), reading(45*time.Minute, now), "Overcast", now)
+	f := Build(params(), reading(45*time.Minute, now), "Overcast", nil, now)
 
 	if len(f.Fields) != 0 {
 		t.Errorf("stale reading produced %d fields (%v), want 0", len(f.Fields), labels(f))
@@ -71,7 +74,7 @@ func TestStaleReadingYieldsZeroFields(t *testing.T) {
 
 func TestNilReadingYieldsZeroFields(t *testing.T) {
 	now := time.Now()
-	f := Build(params(), nil, "Light Rain", now)
+	f := Build(params(), nil, "Light Rain", nil, now)
 
 	if len(f.Fields) != 0 {
 		t.Errorf("offline station produced %d fields (%v), want 0", len(f.Fields), labels(f))
@@ -86,12 +89,12 @@ func TestStalenessBoundary(t *testing.T) {
 	now := time.Now()
 	p := params()
 
-	fresh := Build(p, reading(p.StaleAfter-time.Second, now), "", now)
+	fresh := Build(p, reading(p.StaleAfter-time.Second, now), "", nil, now)
 	if len(fresh.Fields) == 0 {
 		t.Error("reading just inside the window produced no fields")
 	}
 
-	stale := Build(p, reading(p.StaleAfter+time.Second, now), "", now)
+	stale := Build(p, reading(p.StaleAfter+time.Second, now), "", nil, now)
 	if len(stale.Fields) != 0 {
 		t.Errorf("reading just outside the window produced %d fields", len(stale.Fields))
 	}
@@ -103,7 +106,7 @@ func TestZeroStaleAfterDisablesGate(t *testing.T) {
 	p := params()
 	p.StaleAfter = 0
 
-	f := Build(p, reading(365*24*time.Hour, now), "", now)
+	f := Build(p, reading(365*24*time.Hour, now), "", nil, now)
 	if len(f.Fields) == 0 {
 		t.Error("StaleAfter=0 should not gate; got no fields")
 	}
@@ -111,7 +114,7 @@ func TestZeroStaleAfterDisablesGate(t *testing.T) {
 
 func TestTypicalFields(t *testing.T) {
 	now := time.Now()
-	f := Build(params(), reading(time.Minute, now), "Partly Cloudy", now)
+	f := Build(params(), reading(time.Minute, now), "Partly Cloudy", nil, now)
 
 	want := []string{"TEMP", "WIND", "HUMIDITY", "DEW POINT", "PRESSURE"}
 	got := labels(f)
@@ -138,14 +141,14 @@ func TestGustSuffixThreshold(t *testing.T) {
 	calm := &wx.Reading{ObservedAt: now, Fields: map[string]float64{
 		"wind_avg": 0.4, "wind_gust": 0.6, "wind_direction": 0,
 	}}
-	if v := value(t, Build(params(), calm, "", now), "WIND"); strings.Contains(v, "G") {
+	if v := value(t, Build(params(), calm, "", nil, now), "WIND"); strings.Contains(v, "G") {
 		t.Errorf("calm wind carried a gust suffix: %q", v)
 	}
 
 	gusty := &wx.Reading{ObservedAt: now, Fields: map[string]float64{
 		"wind_avg": 8.9, "wind_gust": 15.2, "wind_direction": 158,
 	}}
-	v := value(t, Build(params(), gusty, "", now), "WIND")
+	v := value(t, Build(params(), gusty, "", nil, now), "WIND")
 	if !strings.Contains(v, "G") {
 		t.Errorf("gusty wind lost its gust suffix: %q", v)
 	}
@@ -158,7 +161,7 @@ func TestGustSuffixThreshold(t *testing.T) {
 func TestWindWithoutDirection(t *testing.T) {
 	now := time.Now()
 	r := &wx.Reading{ObservedAt: now, Fields: map[string]float64{"wind_avg": 3.1}}
-	if v := value(t, Build(params(), r, "", now), "WIND"); v != "7 mph" {
+	if v := value(t, Build(params(), r, "", nil, now), "WIND"); v != "7 mph" {
 		t.Errorf("WIND = %q, want %q", v, "7 mph")
 	}
 }
@@ -168,7 +171,7 @@ func TestPartialReflows(t *testing.T) {
 	now := time.Now()
 	r := &wx.Reading{ObservedAt: now, Fields: map[string]float64{"temp": 11.0, "humidity": 77}}
 
-	f := Build(params(), r, "Mostly Cloudy", now)
+	f := Build(params(), r, "Mostly Cloudy", nil, now)
 	if got, want := labels(f), []string{"TEMP", "HUMIDITY"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("labels = %v, want %v", got, want)
 	}
@@ -184,7 +187,7 @@ func TestMaxFieldsCaps(t *testing.T) {
 	p := params()
 	p.MaxFields = 3
 
-	f := Build(p, reading(time.Minute, now), "", now)
+	f := Build(p, reading(time.Minute, now), "", nil, now)
 	if len(f.Fields) != 3 {
 		t.Errorf("got %d fields, want 3", len(f.Fields))
 	}
@@ -195,7 +198,7 @@ func TestNilLocationFallsBackToLocal(t *testing.T) {
 	p := params()
 	p.Location = nil
 
-	if f := Build(p, nil, "", now); f.CapturedAt.IsZero() {
+	if f := Build(p, nil, "", nil, now); f.CapturedAt.IsZero() {
 		t.Error("CapturedAt is zero with a nil location")
 	}
 }
@@ -208,8 +211,9 @@ func TestScenariosMatchDocumentedBehaviour(t *testing.T) {
 	p := params()
 
 	wantFields := map[string]int{
-		"typical": 5, "wide-values": 5, "calm": 5, "night": 5,
-		"partial": 2, "stale": 0, "offline": 0, "no-conditions": 5,
+		"typical": 6, "wide-values": 6, "calm": 6, "night": 6,
+		"partial": 2, "stale": 0, "offline": 0, "no-conditions": 6,
+		"smoke": 6, "stale-air": 5,
 	}
 
 	for _, s := range wx.Scenarios {
@@ -218,7 +222,7 @@ func TestScenariosMatchDocumentedBehaviour(t *testing.T) {
 			t.Errorf("scenario %q is not covered by this test", s.Name)
 			continue
 		}
-		f := Build(p, s.Reading(now), s.Conditions, now)
+		f := Build(p, s.Reading(now), s.Conditions, s.AirReading(now), now)
 		if len(f.Fields) != want {
 			t.Errorf("scenario %q produced %d fields (%v), want %d",
 				s.Name, len(f.Fields), labels(f), want)
@@ -227,5 +231,68 @@ func TestScenariosMatchDocumentedBehaviour(t *testing.T) {
 
 	if len(wx.Scenarios) != len(wantFields) {
 		t.Errorf("%d scenarios defined, %d covered", len(wx.Scenarios), len(wantFields))
+	}
+}
+
+func air(age time.Duration, now time.Time) *aqi.Reading {
+	return &aqi.Reading{ObservedAt: now.Add(-age), AQI: 42, Level: "Good", PM25: 9.4, HasPM25: true}
+}
+
+// The index slots in after wind so it outranks dew point and pressure when
+// columns get dropped.
+func TestAirQualitySitsAfterWind(t *testing.T) {
+	now := time.Now()
+	f := Build(params(), reading(time.Minute, now), "Clear", air(time.Minute, now), now)
+
+	want := []string{"TEMP", "WIND", "AIR QUALITY", "HUMIDITY", "DEW POINT", "PRESSURE"}
+	if got := labels(f); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("labels = %v, want %v", got, want)
+	}
+	if v := value(t, f, "AIR QUALITY"); v != "42 Good" {
+		t.Errorf("AIR QUALITY = %q, want %q", v, "42 Good")
+	}
+}
+
+func TestAirQualityLevelIsShortened(t *testing.T) {
+	now := time.Now()
+	a := air(time.Minute, now)
+	a.AQI, a.Level = 150, "Unhealthy for Sensitive Groups"
+	f := Build(params(), reading(time.Minute, now), "", a, now)
+	if v := value(t, f, "AIR QUALITY"); v != "150 Sensitive" {
+		t.Errorf("AIR QUALITY = %q, want %q", v, "150 Sensitive")
+	}
+}
+
+// The two sources are gated independently: a quiet air feed drops only its
+// own field, and a stale station still lets a fresh index through.
+func TestAirQualityGatedOnItsOwn(t *testing.T) {
+	now := time.Now()
+
+	f := Build(params(), reading(time.Minute, now), "", air(45*time.Minute, now), now)
+	if len(f.Fields) != 5 {
+		t.Errorf("stale air: got %v, want the 5 station fields only", labels(f))
+	}
+
+	f = Build(params(), reading(45*time.Minute, now), "", air(time.Minute, now), now)
+	if got := labels(f); strings.Join(got, ",") != "AIR QUALITY" {
+		t.Errorf("stale station, fresh air: labels = %v, want [AIR QUALITY]", got)
+	}
+
+	p := params()
+	p.AirStaleAfter = 0
+	f = Build(p, nil, "", air(48*time.Hour, now), now)
+	if len(f.Fields) != 1 {
+		t.Errorf("zero AirStaleAfter should not gate; got %v", labels(f))
+	}
+}
+
+// With a partial station reading there is no wind to sit behind, so the index
+// takes the earliest slot it can.
+func TestAirQualityWithPartialStation(t *testing.T) {
+	now := time.Now()
+	r := &wx.Reading{ObservedAt: now, Fields: map[string]float64{"temp": 11.0}}
+	f := Build(params(), r, "", air(time.Minute, now), now)
+	if got := labels(f); strings.Join(got, ",") != "TEMP,AIR QUALITY" {
+		t.Errorf("labels = %v, want [TEMP AIR QUALITY]", got)
 	}
 }
