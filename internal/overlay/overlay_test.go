@@ -677,3 +677,59 @@ func TestRepoThemeParses(t *testing.T) {
 		t.Errorf("repo theme puts the portrait crest in the bar (placement %q)", th.LogoPlacement)
 	}
 }
+
+// The warning pill has to be unmistakably its own colour, in its own corner,
+// and absent when there is nothing to say.
+func TestWarningPillIsAmberInTheCorner(t *testing.T) {
+	r := testRenderer(t, DefaultTheme(), false)
+	src := image.NewRGBA(image.Rect(0, 0, 1920, 1080))
+	for i := 0; i < len(src.Pix); i += 4 {
+		src.Pix[i], src.Pix[i+1], src.Pix[i+2], src.Pix[i+3] = 40, 60, 90, 255
+	}
+
+	amber := func(img image.Image) bool {
+		t := DefaultTheme()
+		// Sample a band just inside the top-right margin, where the pill sits.
+		y := int(1080*t.WarningMargin) + int(1080*t.WarningSize)/2
+		for x := 1920 - int(1080*t.WarningMargin) - 4; x > 1200; x-- {
+			cr, cg, cb, _ := img.At(x, y).RGBA()
+			if cr>>8 > 200 && cg>>8 > 140 && cb>>8 < 90 {
+				return true
+			}
+		}
+		return false
+	}
+
+	out, err := r.Render(src, Frame{SiteName: "Test", CapturedAt: time.Now(), Warning: "LIGHTNING · 5 strikes in the last hour"})
+	if err != nil {
+		t.Fatalf("render with warning: %v", err)
+	}
+	if !amber(out) {
+		t.Error("no amber pixels in the top-right band with a warning set")
+	}
+
+	out, err = r.Render(src, Frame{SiteName: "Test", CapturedAt: time.Now()})
+	if err != nil {
+		t.Fatalf("render without warning: %v", err)
+	}
+	if amber(out) {
+		t.Error("amber pixels in the top-right band with no warning")
+	}
+
+	th := DefaultTheme()
+	th.WarningPlacement = "none"
+	r.SetTheme(th)
+	out, err = r.Render(src, Frame{SiteName: "Test", CapturedAt: time.Now(), Warning: "LIGHTNING"})
+	if err != nil {
+		t.Fatalf("render with warning hidden: %v", err)
+	}
+	if amber(out) {
+		t.Error("warning_placement none still drew the pill")
+	}
+
+	th.WarningPlacement = "top-rihgt"
+	r.SetTheme(th)
+	if _, err := r.Render(src, Frame{SiteName: "Test", CapturedAt: time.Now(), Warning: "LIGHTNING"}); err == nil {
+		t.Error("a misspelt warning_placement rendered instead of failing")
+	}
+}

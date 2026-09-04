@@ -200,7 +200,8 @@ func run(log *slog.Logger) error {
 		Location:   loc,
 		MaxFields:  theme.MaxFields,
 		// Six publish cycles: a feed that quiet has a problem worth hiding.
-		AirStaleAfter: airStaleAfter,
+		AirStaleAfter:   airStaleAfter,
+		LightningWindow: lightningWindow,
 	}
 
 	if err := selfTest(ctx, cam, renderer, params); err != nil {
@@ -379,7 +380,15 @@ func (d *daemon) renderFrame(ctx context.Context, now time.Time) error {
 	if c := d.conditions.Latest(); c != nil && now.Sub(c.ObservedAt) < 90*time.Minute {
 		conditions = c.Text
 	}
-	f := frame.Build(d.params, d.lastGood, conditions, d.air.Latest(), now)
+	// Strikes are summarised over the trailing hour on each render rather
+	// than each poll: the answer changes once a minute at most, and a failed
+	// query just means no warning this frame.
+	lightning, err := d.source.Lightning(ctx, lightningWindow)
+	if err != nil {
+		d.log.Warn("lightning query failed", "error", err)
+		lightning = nil
+	}
+	f := frame.Build(d.params, d.lastGood, conditions, d.air.Latest(), lightning, now)
 
 	// Measured off the frame we are about to publish, so the treatment always
 	// matches the picture it is drawn on rather than trailing it by one cycle.
@@ -554,6 +563,10 @@ func startTelemetry(ctx context.Context, cfg *config.Config, log *slog.Logger) (
 // airStaleAfter is how old an air quality reading may be and still be drawn.
 const airStaleAfter = 30 * time.Minute
 
+// lightningWindow is how recently a strike must have been heard for the
+// warning to show, and the range of the query that looks for one.
+const lightningWindow = time.Hour
+
 func selfTest(ctx context.Context, cam *protect.Client, r *overlay.Renderer, p frame.Params) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -574,7 +587,7 @@ func selfTest(ctx context.Context, cam *protect.Client, r *overlay.Renderer, p f
 	// one extra resample of the annotation at startup.
 	now := time.Now()
 	for _, night := range []bool{false, true} {
-		f := frame.Build(p, sc.Reading(now), sc.Conditions, sc.AirReading(now), now)
+		f := frame.Build(p, sc.Reading(now), sc.Conditions, sc.AirReading(now), sc.LightningReading(now), now)
 		f.Night = night
 		if _, err := r.Render(still.Image, f); err != nil {
 			return fmt.Errorf("startup render check (night=%v): %w", night, err)

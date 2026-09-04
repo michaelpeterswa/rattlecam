@@ -128,13 +128,14 @@ func main() {
 		list:      list,
 		night:     isNight,
 		params: frame.Params{
-			SiteName:      *site,
-			Credit:        *credit,
-			Elevation:     *elevation,
-			StaleAfter:    *staleAfter,
-			Location:      loc,
-			MaxFields:     theme.MaxFields,
-			AirStaleAfter: 30 * time.Minute,
+			SiteName:        *site,
+			Credit:          *credit,
+			Elevation:       *elevation,
+			StaleAfter:      *staleAfter,
+			Location:        loc,
+			MaxFields:       theme.MaxFields,
+			AirStaleAfter:   30 * time.Minute,
+			LightningWindow: time.Hour,
 		},
 	}
 
@@ -227,7 +228,7 @@ func (h *harness) render(name string) (image.Image, error) {
 		return nil, err
 	}
 	now := time.Now()
-	f := frame.Build(h.params, s.Reading(now), s.Conditions, s.AirReading(now), now)
+	f := frame.Build(h.params, s.Reading(now), s.Conditions, s.AirReading(now), s.LightningReading(now), now)
 	f.Night = h.night
 	return h.renderer.Render(h.src, f)
 }

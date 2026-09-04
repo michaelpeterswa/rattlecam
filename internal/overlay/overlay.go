@@ -32,6 +32,12 @@ type Frame struct {
 	// the weather needs.
 	Credit string
 
+	// Warning is a transient notice that something is happening right now,
+	// e.g. lightning in the last hour. Empty means nothing to warn about,
+	// which is nearly always. It gets its own colour and its own corner
+	// because a warning that looks like the rest of the furniture is not one.
+	Warning string
+
 	// Night inverts the annotation, so the peak outline and its labels are drawn
 	// in white rather than black.
 	//
@@ -288,7 +294,84 @@ func (r *Renderer) Render(src image.Image, f Frame) (image.Image, error) {
 		}
 	}
 
+	// The warning goes on last of all: nothing may sit over it, and it is
+	// drawn after the annotation's night inversion so it keeps its colour in
+	// the dark.
+	if f.Warning != "" && !t.WarningHidden() {
+		if err := r.drawWarning(dc, b, t, f.Warning); err != nil {
+			return nil, err
+		}
+	}
+
 	return dc.Image(), nil
+}
+
+// drawWarning floats a notice in a coloured pill in a top corner, with a
+// lightning bolt in front of the text.
+//
+// It borrows the credit box's shape so the two read as one family, but not
+// its colour: the credit hides against the sky on purpose, and a warning
+// must do the opposite. The bolt is drawn as a polygon rather than a glyph
+// because the condensed face has no such character and an emoji fallback
+// would render differently on every host.
+func (r *Renderer) drawWarning(dc *gg.Context, b image.Rectangle, t Theme, text string) error {
+	if t.WarningPlacement != "top-right" && t.WarningPlacement != "top-left" {
+		return fmt.Errorf("overlay: unknown warning_placement %q (want top-right, top-left, or none)", t.WarningPlacement)
+	}
+
+	w, h := float64(b.Dx()), float64(b.Dy())
+
+	size := h * t.WarningSize
+	if size < 1 {
+		return nil
+	}
+	if err := dc.LoadFontFace(r.boldFontPath, size); err != nil {
+		return err
+	}
+	tw, th := dc.MeasureString(text)
+
+	padX := size * t.WarningBoxPad
+	padY := size * t.WarningBoxPad * 0.5
+	iconW := th * 0.62
+	gap := size * 0.45
+
+	boxW := iconW + gap + tw + 2*padX
+	boxH := th + 2*padY
+	boxY := h * t.WarningMargin
+	boxX := h * t.WarningMargin
+	if t.WarningPlacement == "top-right" {
+		boxX = w - h*t.WarningMargin - boxW
+	}
+
+	radius := boxH / 2 * t.WarningBoxRadius
+	if radius < 0 {
+		radius = 0
+	}
+
+	dc.SetRGBA(t.WarningColor.R, t.WarningColor.G, t.WarningColor.B, t.WarningBoxOpacity)
+	dc.DrawRoundedRectangle(boxX, boxY, boxW, boxH, radius)
+	dc.Fill()
+
+	dc.SetRGB(t.WarningTextColor.R, t.WarningTextColor.G, t.WarningTextColor.B)
+	drawBolt(dc, boxX+padX, boxY+(boxH-th)/2, iconW, th)
+	dc.DrawStringAnchored(text, boxX+padX+iconW+gap, boxY+boxH/2, 0, 0.5)
+	return nil
+}
+
+// drawBolt fills a lightning bolt inside the box at (x, y) of the given size,
+// in whatever colour the context currently has.
+func drawBolt(dc *gg.Context, x, y, w, h float64) {
+	// A seven-point bolt on a unit square, top to bottom, zig then zag.
+	pts := [][2]float64{
+		{0.62, 0.00}, {0.10, 0.58}, {0.46, 0.58},
+		{0.34, 1.00}, {0.90, 0.40}, {0.54, 0.40}, {0.66, 0.00},
+	}
+	dc.MoveTo(x+pts[0][0]*w, y+pts[0][1]*h)
+	for _, p := range pts[1:] {
+		dc.LineTo(x+p[0]*w, y+p[1]*h)
+	}
+	dc.ClosePath()
+	dc.Fill()
 }
 
 // drawCreditBox floats the attribution in its own box at the top of the frame.

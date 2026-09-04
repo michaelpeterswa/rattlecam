@@ -20,6 +20,29 @@ type Scenario struct {
 	AgeMinutes float64            `json:"age_minutes"`   // how stale the observation is
 	Fields     map[string]float64 `json:"fields"`        // nil means "station offline"
 	Air        *Air               `json:"air,omitempty"` // nil means "no air quality feed"
+	Lightning  *Strikes           `json:"lightning,omitempty"`
+}
+
+// Strikes is a scenario's lightning: how many in the trailing hour, how long
+// ago the last one was, and how far off.
+type Strikes struct {
+	Count      int     `json:"count"`
+	MinutesAgo float64 `json:"minutes_ago"`
+	DistanceKM float64 `json:"distance_km"`
+}
+
+// LightningReading converts the scenario's strikes into what the hourly
+// query returns. A scenario without any yields an empty summary, the same as
+// a quiet hour.
+func (s Scenario) LightningReading(now time.Time) *Lightning {
+	l := &Lightning{Window: time.Hour}
+	if s.Lightning == nil {
+		return l
+	}
+	l.Strikes = s.Lightning.Count
+	l.LastStrike = now.Add(-time.Duration(s.Lightning.MinutesAgo * float64(time.Minute)))
+	l.DistanceKM, l.HasDist = s.Lightning.DistanceKM, s.Lightning.DistanceKM > 0
+	return l
 }
 
 // Air is the synthetic air quality reading that accompanies a scenario. It
@@ -88,7 +111,8 @@ var Scenarios = []Scenario{
 			"uv": 11.4, "solar_radiation": 1180, "precipitation": 12.7, "precipitation_type": 1,
 			"strike_count": 47, "strike_distance": 3,
 		},
-		Air: &Air{AQI: 150, Level: "Unhealthy for Sensitive Groups", PM25: 55.4},
+		Air:       &Air{AQI: 150, Level: "Unhealthy for Sensitive Groups", PM25: 55.4},
+		Lightning: &Strikes{Count: 147, MinutesAgo: 59, DistanceKM: 40},
 	},
 	{
 		Name:       "calm",
@@ -119,6 +143,19 @@ var Scenarios = []Scenario{
 		Fields: map[string]float64{
 			"temp": 11.0, "humidity": 77,
 		},
+	},
+	{
+		Name:       "lightning",
+		Note:       "a storm passing — the warning pill appears, everything else is ordinary",
+		Conditions: "Thunderstorm",
+		Fields: map[string]float64{
+			"temp": 16.8, "humidity": 88, "dew_point": 14.7, "p": 1006.1,
+			"wind_avg": 6.3, "wind_gust": 12.9, "wind_direction": 210,
+			"uv": 0.6, "solar_radiation": 40, "precipitation": 2.1,
+			"strike_count": 2, "strike_distance": 9,
+		},
+		Air:       &Air{AQI: 24, Level: "Good", PM25: 5.8},
+		Lightning: &Strikes{Count: 5, MinutesAgo: 3, DistanceKM: 9},
 	},
 	{
 		Name:       "smoke",

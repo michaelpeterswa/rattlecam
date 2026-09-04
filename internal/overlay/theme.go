@@ -110,6 +110,24 @@ type Theme struct {
 
 	StampFormat string `json:"stamp_format"`
 
+	// WarningPlacement decides where a transient notice (lightning in the
+	// last hour) goes: "top-right", "top-left", or "none" to suppress it.
+	// The default is the corner the crest is not in.
+	WarningPlacement string `json:"warning_placement"`
+
+	// WarningSize is the notice's text size as a fraction of image height,
+	// and WarningMargin its inset from the edges, likewise.
+	WarningSize   float64 `json:"warning_size"`
+	WarningMargin float64 `json:"warning_margin"`
+
+	// The pill behind the notice. Amber by default: it has to read as a
+	// warning against a white sky and a black one, and against the crest.
+	WarningColor      RGB     `json:"warning_color"`
+	WarningTextColor  RGB     `json:"warning_text_color"`
+	WarningBoxOpacity float64 `json:"warning_box_opacity"`
+	WarningBoxPad     float64 `json:"warning_box_pad"`    // fraction of text size
+	WarningBoxRadius  float64 `json:"warning_box_radius"` // fraction of half box height; 1 is a pill
+
 	// MaxFields caps the data strip. Past six the lower third turns to mush,
 	// especially once a station downscales it for broadcast.
 	MaxFields int `json:"max_fields"`
@@ -133,6 +151,9 @@ func (t Theme) creditInBar() bool {
 
 // CreditHidden reports whether the theme suppresses the attribution entirely.
 func (t Theme) CreditHidden() bool { return t.CreditPlacement == "none" }
+
+// WarningHidden reports whether the theme suppresses transient notices.
+func (t Theme) WarningHidden() bool { return t.WarningPlacement == "none" }
 
 func DefaultTheme() Theme {
 	return Theme{
@@ -182,6 +203,15 @@ func DefaultTheme() Theme {
 		BlockGap:  2.0,
 		ColGap:    1.4,
 		ColSpread: 1.0,
+
+		WarningPlacement:  "top-right",
+		WarningSize:       0.024,
+		WarningMargin:     0.030,
+		WarningColor:      RGB{0.98, 0.69, 0.13},
+		WarningTextColor:  RGB{0.10, 0.07, 0.02},
+		WarningBoxOpacity: 0.94,
+		WarningBoxPad:     0.85,
+		WarningBoxRadius:  1.0,
 
 		StampFormat: "Jan 2, 2006 · 3:04 PM MST",
 		MaxFields:   6,
