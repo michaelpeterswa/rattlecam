@@ -38,6 +38,7 @@ type Metrics struct {
 	influxSeconds   metric.Float64Histogram
 	influxErrors    metric.Int64Counter
 	nwsErrors       metric.Int64Counter
+	aqiErrors       metric.Int64Counter
 	storeErrors     metric.Int64Counter
 	spoolEntries    metric.Int64Gauge
 	spoolBytes      metric.Int64Gauge
@@ -127,6 +128,13 @@ func New(meter metric.Meter) (*Metrics, error) {
 		metric.WithDescription("Failed conditions refreshes."),
 	); err != nil {
 		return nil, fmt.Errorf("metrics: nws.errors: %w", err)
+	}
+
+	if m.aqiErrors, err = meter.Int64Counter(
+		"rattlecam.aqi.errors",
+		metric.WithDescription("Failed air quality refreshes."),
+	); err != nil {
+		return nil, fmt.Errorf("metrics: aqi.errors: %w", err)
 	}
 
 	if m.spoolEntries, err = meter.Int64Gauge(
@@ -277,4 +285,9 @@ func (m *Metrics) Night(ctx context.Context, night bool, luma float64) {
 // NWSError records a failed conditions refresh.
 func (m *Metrics) NWSError(ctx context.Context) {
 	m.nwsErrors.Add(ctx, 1)
+}
+
+// AQIError records a failed air quality refresh.
+func (m *Metrics) AQIError(ctx context.Context) {
+	m.aqiErrors.Add(ctx, 1)
 }

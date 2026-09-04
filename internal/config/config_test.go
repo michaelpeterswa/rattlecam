@@ -193,6 +193,8 @@ func TestValidValuesAccepted(t *testing.T) {
 	t.Setenv("POLL_INTERVAL", "30s")
 	t.Setenv("STALE_AFTER", "5m")
 	t.Setenv("MIN_FRAME_GAP", "0s") // a zero floor is legitimate
+	t.Setenv("AQI_URL", "https://storage.googleapis.com/example/aqi/v1")
+	t.Setenv("AQI_INTERVAL", "2m")
 	t.Setenv("RETENTION_DAYS", "30")
 
 	c, err := Load()
@@ -210,6 +212,12 @@ func TestValidValuesAccepted(t *testing.T) {
 	}
 	if c.RetentionDays != 30 {
 		t.Errorf("RetentionDays = %d, want 30", c.RetentionDays)
+	}
+	if c.AQIURL != "https://storage.googleapis.com/example/aqi/v1" {
+		t.Errorf("AQIURL = %q", c.AQIURL)
+	}
+	if c.AQIInterval != 2*time.Minute {
+		t.Errorf("AQIInterval = %s, want 2m", c.AQIInterval)
 	}
 }
 

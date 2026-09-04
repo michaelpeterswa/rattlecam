@@ -10,6 +10,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/michaelpeterswa/rattlecam/internal/aqi"
 	"github.com/michaelpeterswa/rattlecam/internal/overlay"
 	"github.com/michaelpeterswa/rattlecam/internal/wx"
 )
@@ -21,12 +22,19 @@ type Params struct {
 	StaleAfter time.Duration
 	Location   *time.Location
 	MaxFields  int
+
+	// AirStaleAfter bounds the air quality reading separately: it comes from
+	// a different source on a five minute publish cycle, and a quiet feed
+	// should drop its own field without taking the station's down. Zero
+	// means no limit.
+	AirStaleAfter time.Duration
 }
 
-// Build assembles the frame. Any reading past the staleness threshold
+// Build assembles the frame. Any reading past its staleness threshold
 // contributes nothing: an omitted field is recoverable, a wrong one on the
-// evening news is not.
-func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) overlay.Frame {
+// evening news is not. The station reading and the air quality reading are
+// gated independently, so one going quiet does not blank the other.
+func Build(p Params, r *wx.Reading, conditions string, air *aqi.Reading, capturedAt time.Time) overlay.Frame {
 	loc := p.Location
 	if loc == nil {
 		loc = time.Local
@@ -39,12 +47,34 @@ func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) ove
 		CapturedAt: capturedAt.In(loc),
 	}
 
-	if r == nil || (p.StaleAfter > 0 && r.Age(capturedAt) > p.StaleAfter) {
-		return f
+	f.Fields = stationFields(p, r, capturedAt)
+
+	// The index sits after wind: on a smoke day it is the number people came
+	// for, and it should survive the column drop ahead of dew point and
+	// pressure. Level over concentration, because "Moderate" means something
+	// to a viewer and "24 µg/m³" does not.
+	if air != nil && (p.AirStaleAfter <= 0 || capturedAt.Sub(air.ObservedAt) <= p.AirStaleAfter) {
+		fld := overlay.Field{Label: "AIR QUALITY", Value: fmt.Sprintf("%d %s", air.AQI, aqi.ShortLevel(air.Level))}
+		at := min(len(f.Fields), 2)
+		f.Fields = append(f.Fields[:at], append([]overlay.Field{fld}, f.Fields[at:]...)...)
 	}
 
+	if p.MaxFields > 0 && len(f.Fields) > p.MaxFields {
+		f.Fields = f.Fields[:p.MaxFields]
+	}
+	return f
+}
+
+// stationFields formats the weather station's reading, or nothing if it is
+// missing or stale.
+func stationFields(p Params, r *wx.Reading, capturedAt time.Time) []overlay.Field {
+	if r == nil || (p.StaleAfter > 0 && r.Age(capturedAt) > p.StaleAfter) {
+		return nil
+	}
+
+	var fields []overlay.Field
 	if v, ok := r.TempF(); ok {
-		f.Fields = append(f.Fields, overlay.Field{Label: "TEMP", Value: fmt.Sprintf("%.0f°F", round0(v))})
+		fields = append(fields, overlay.Field{Label: "TEMP", Value: fmt.Sprintf("%.0f°F", round0(v))})
 	}
 
 	// Wind reads as one composite value: direction, sustained, then gust —
@@ -57,23 +87,19 @@ func Build(p Params, r *wx.Reading, conditions string, capturedAt time.Time) ove
 		if gust, ok := r.GustMPH(); ok && gust >= spd+3 {
 			val += fmt.Sprintf(" G%.0f", gust)
 		}
-		f.Fields = append(f.Fields, overlay.Field{Label: "WIND", Value: val})
+		fields = append(fields, overlay.Field{Label: "WIND", Value: val})
 	}
 
 	if v, ok := r.HumidityPct(); ok {
-		f.Fields = append(f.Fields, overlay.Field{Label: "HUMIDITY", Value: fmt.Sprintf("%.0f%%", v)})
+		fields = append(fields, overlay.Field{Label: "HUMIDITY", Value: fmt.Sprintf("%.0f%%", v)})
 	}
 	if v, ok := r.DewPointF(); ok {
-		f.Fields = append(f.Fields, overlay.Field{Label: "DEW POINT", Value: fmt.Sprintf("%.0f°F", round0(v))})
+		fields = append(fields, overlay.Field{Label: "DEW POINT", Value: fmt.Sprintf("%.0f°F", round0(v))})
 	}
 	if v, ok := r.PressureInHg(p.Elevation); ok {
-		f.Fields = append(f.Fields, overlay.Field{Label: "PRESSURE", Value: fmt.Sprintf("%.2f in", v)})
+		fields = append(fields, overlay.Field{Label: "PRESSURE", Value: fmt.Sprintf("%.2f in", v)})
 	}
-
-	if p.MaxFields > 0 && len(f.Fields) > p.MaxFields {
-		f.Fields = f.Fields[:p.MaxFields]
-	}
-	return f
+	return fields
 }
 
 // round0 rounds to a whole number and collapses negative zero.

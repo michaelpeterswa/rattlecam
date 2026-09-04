@@ -30,6 +30,9 @@ type Config struct {
 	NWSStationID string // e.g. KPAE. Empty disables the conditions text.
 	NWSUserAgent string // required by api.weather.gov: "rattlecam (you@example.com)"
 
+	// Air quality
+	AQIURL string // prefix aqi-api publishes under, e.g. https://.../aqi/v1. Empty disables the field.
+
 	// Site
 	SiteName  string
 	Credit    string  // standing attribution line, empty hides it
@@ -86,6 +89,7 @@ type Config struct {
 	MaxFrameAge  time.Duration // force a frame even with no new data
 	StaleAfter   time.Duration // observations older than this are not rendered
 	NWSInterval  time.Duration
+	AQIInterval  time.Duration
 
 	// Warnings are settings that were accepted but adjusted, or that will not
 	// do what they look like they do. Not fatal, but the operator should see
@@ -110,6 +114,8 @@ func Load() (*Config, error) {
 
 		NWSStationID: l.str("NWS_STATION_ID", ""),
 		NWSUserAgent: l.str("NWS_USER_AGENT", "rattlecam"),
+
+		AQIURL: l.str("AQI_URL", ""),
 
 		SiteName:  l.str("SITE_NAME", ""),
 		Credit:    l.str("CREDIT", ""),
@@ -148,6 +154,7 @@ func Load() (*Config, error) {
 		MaxFrameAge:  l.dur("MAX_FRAME_AGE", 3*time.Minute),
 		StaleAfter:   l.dur("STALE_AFTER", 10*time.Minute),
 		NWSInterval:  l.dur("NWS_INTERVAL", 10*time.Minute),
+		AQIInterval:  l.dur("AQI_INTERVAL", 5*time.Minute),
 	}
 
 	// Ordered, so the reported list is stable between runs.
@@ -219,6 +226,7 @@ func Load() (*Config, error) {
 		{"MAX_FRAME_AGE", c.MaxFrameAge},
 		{"STALE_AFTER", c.StaleAfter},
 		{"NWS_INTERVAL", c.NWSInterval},
+		{"AQI_INTERVAL", c.AQIInterval},
 	} {
 		if d.val <= 0 {
 			l.fail("%s: must be positive, got %s", d.key, d.val)
