@@ -51,6 +51,7 @@ layout you tuned against one pleasant afternoon reading:
 | `stale` | Observation past threshold — every data field drops out |
 | `offline` | Station silent; the image still publishes, bare |
 | `no-conditions` | api.weather.gov unreachable; site name sits alone |
+| `lightning` | A storm passing — the amber warning pill appears top-right; everything else is ordinary |
 | `smoke` | Wildfire smoke — a "214 V. Unhealthy" index beside an ordinary station reading |
 | `stale-air` | Station fresh but the air quality feed quiet — that one field drops, the rest stay |
 
@@ -111,6 +112,13 @@ beyond a percent is a hard error rather than a silent stretch. It may be authore
 at any resolution with that shape; it is scaled once per output size and cached.
 `annotation_opacity` scales it, and values above 1 strengthen a faint file rather
 than clipping.
+
+When the station has heard lightning in the last hour, an amber pill with a
+bolt appears in the top-right corner: `LIGHTNING · 5 strikes in the last hour ·
+last 3 min ago · ~6 mi`. It comes from an hourly query of the station's
+`strike_count` and `strike_distance`, so it needs nothing beyond the InfluxDB
+settings, and it disappears on its own an hour after the last strike.
+`warning_placement` in the theme moves it (`top-left`) or hides it (`none`).
 
 `CREDIT` is a standing attribution line. `credit_placement` puts it either in the
 bar under the timestamp (`"bar"`), where it is compact but easy to overlook, or

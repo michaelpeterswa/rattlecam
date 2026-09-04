@@ -114,7 +114,39 @@ func (s *InfluxSource) Latest(ctx context.Context) (*Reading, error) {
 	return parseAnnotatedCSV(resp.Body)
 }
 
-// parseAnnotatedCSV reads Flux's annotated CSV dialect into a single Reading.
+// fluxRow is one data row of a Flux result: a field's value at a time.
+type fluxRow struct {
+	time  time.Time
+	field string
+	value float64
+}
+
+// parseAnnotatedCSV reads Flux's annotated CSV dialect into a single Reading:
+// the last value seen for each field, stamped with the newest row time.
+func parseAnnotatedCSV(r io.Reader) (*Reading, error) {
+	rows, err := parseRows(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, ErrNoData
+	}
+
+	out := make(map[string]float64, len(fields))
+	var latest time.Time
+	for _, row := range rows {
+		out[row.field] = row.value
+		if row.time.After(latest) {
+			latest = row.time
+		}
+	}
+	if latest.IsZero() {
+		return nil, fmt.Errorf("wx: response carried %d fields but no usable _time", len(out))
+	}
+	return &Reading{ObservedAt: latest, Fields: out}, nil
+}
+
+// parseRows reads Flux's annotated CSV dialect into rows.
 //
 // The format is awkward in three specific ways, and all three are load-bearing
 // here: every data row carries a leading empty column left over from the
@@ -122,7 +154,7 @@ func (s *InfluxSource) Latest(ctx context.Context) (*Reading, error) {
 // response may contain several tables, each of which may restate its own header
 // row. Column positions therefore cannot be assumed — indices are resolved from
 // whichever header row is currently in effect.
-func parseAnnotatedCSV(r io.Reader) (*Reading, error) {
+func parseRows(r io.Reader) ([]fluxRow, error) {
 	cr := csv.NewReader(r)
 	cr.FieldsPerRecord = -1 // tables vary in width, and annotations vary again
 	cr.ReuseRecord = true
@@ -131,8 +163,7 @@ func parseAnnotatedCSV(r io.Reader) (*Reading, error) {
 		idxTime, idxField, idxValue = -1, -1, -1
 		idxError, idxReference      = -1, -1
 		expectHeader                bool
-		out                         = make(map[string]float64, len(fields))
-		latest                      time.Time
+		rows                        []fluxRow
 	)
 
 	for {
@@ -198,24 +229,17 @@ func parseAnnotatedCSV(r io.Reader) (*Reading, error) {
 		if err != nil {
 			continue // a non-numeric column is not an observation we can use
 		}
-		out[name] = v
 
+		row := fluxRow{field: name, value: v}
 		if idxTime >= 0 && idxTime < len(rec) {
 			if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(rec[idxTime])); err == nil {
-				if ts.After(latest) {
-					latest = ts
-				}
+				row.time = ts
 			}
 		}
+		rows = append(rows, row)
 	}
 
-	if len(out) == 0 {
-		return nil, ErrNoData
-	}
-	if latest.IsZero() {
-		return nil, fmt.Errorf("wx: response carried %d fields but no usable _time", len(out))
-	}
-	return &Reading{ObservedAt: latest, Fields: out}, nil
+	return rows, nil
 }
 
 func indexOf(rec []string, name string) int {

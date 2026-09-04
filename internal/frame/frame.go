@@ -8,6 +8,7 @@ package frame
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/michaelpeterswa/rattlecam/internal/aqi"
@@ -23,6 +24,10 @@ type Params struct {
 	Location   *time.Location
 	MaxFields  int
 
+	// LightningWindow is how recently a strike must have been heard for the
+	// warning to show. Zero disables it.
+	LightningWindow time.Duration
+
 	// AirStaleAfter bounds the air quality reading separately: it comes from
 	// a different source on a five minute publish cycle, and a quiet feed
 	// should drop its own field without taking the station's down. Zero
@@ -34,7 +39,7 @@ type Params struct {
 // contributes nothing: an omitted field is recoverable, a wrong one on the
 // evening news is not. The station reading and the air quality reading are
 // gated independently, so one going quiet does not blank the other.
-func Build(p Params, r *wx.Reading, conditions string, air *aqi.Reading, capturedAt time.Time) overlay.Frame {
+func Build(p Params, r *wx.Reading, conditions string, air *aqi.Reading, lightning *wx.Lightning, capturedAt time.Time) overlay.Frame {
 	loc := p.Location
 	if loc == nil {
 		loc = time.Local
@@ -48,6 +53,7 @@ func Build(p Params, r *wx.Reading, conditions string, air *aqi.Reading, capture
 	}
 
 	f.Fields = stationFields(p, r, capturedAt)
+	f.Warning = lightningWarning(p, lightning, capturedAt)
 
 	// The index sits after wind: on a smoke day it is the number people came
 	// for, and it should survive the column drop ahead of dew point and
@@ -112,4 +118,44 @@ func round0(v float64) float64 {
 		return 0
 	}
 	return r
+}
+
+// lightningWarning is the notice for strikes inside the window, or nothing.
+// It leads with the fact, then the three things a viewer wants to know: how
+// many, how recent, how far.
+func lightningWarning(p Params, l *wx.Lightning, now time.Time) string {
+	if l == nil || p.LightningWindow <= 0 || l.Strikes <= 0 || l.LastStrike.IsZero() {
+		return ""
+	}
+	age := now.Sub(l.LastStrike)
+	if age < 0 || age > p.LightningWindow {
+		return ""
+	}
+
+	noun := "strikes"
+	if l.Strikes == 1 {
+		noun = "strike"
+	}
+	parts := []string{
+		"LIGHTNING",
+		fmt.Sprintf("%d %s in the last hour", l.Strikes, noun),
+		"last " + agoText(age),
+	}
+	if l.HasDist {
+		parts = append(parts, fmt.Sprintf("~%.0f mi", math.Max(1, math.Round(l.DistanceMiles()))))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// agoText renders an age the way a person would say it.
+func agoText(d time.Duration) string {
+	mins := int(math.Round(d.Minutes()))
+	switch {
+	case mins < 1:
+		return "just now"
+	case mins == 1:
+		return "1 min ago"
+	default:
+		return fmt.Sprintf("%d min ago", mins)
+	}
 }
